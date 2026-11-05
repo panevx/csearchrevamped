@@ -1,38 +1,103 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="wrap_content"
-    android:layout_height="wrap_content"
-    android:background="@drawable/bg_pill"
-    android:elevation="6dp"
-    android:gravity="center_vertical"
-    android:orientation="horizontal"
-    android:paddingStart="16dp"
-    android:paddingEnd="4dp">
+    android:layout_height="wrap_content">
 
-    <ImageView
-        android:layout_width="20dp"
-        android:layout_height="20dp"
-        android:importantForAccessibility="no"
-        android:src="@drawable/ic_translate"
-        app:tint="@android:color/white" />
-
-    <TextView
-        android:id="@+id/liveStatus"
+    <!-- Full bar -->
+    <LinearLayout
+        android:id="@+id/liveExpanded"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginStart="10dp"
-        android:layout_marginEnd="4dp"
-        android:maxWidth="260dp"
-        android:textColor="@android:color/white"
-        android:textSize="14sp" />
+        android:layout_margin="8dp"
+        android:background="@drawable/bg_pill"
+        android:elevation="6dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="6dp"
+        android:paddingEnd="4dp">
 
-    <ImageButton
-        android:id="@+id/liveStop"
-        android:layout_width="44dp"
-        android:layout_height="44dp"
-        android:background="?attr/selectableItemBackgroundBorderless"
-        android:contentDescription="@string/live_stop"
-        android:src="@drawable/ic_close"
-        app:tint="@android:color/white" />
-</LinearLayout>
+        <LinearLayout
+            android:id="@+id/liveLanguage"
+            android:layout_width="wrap_content"
+            android:layout_height="44dp"
+            android:background="@drawable/bg_pill_ripple"
+            android:contentDescription="@string/choose_language"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="10dp"
+            android:paddingEnd="6dp">
+
+            <ImageView
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_translate"
+                app:tint="@android:color/white" />
+
+            <TextView
+                android:id="@+id/liveStatus"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:maxWidth="220dp"
+                android:textColor="@android:color/white"
+                android:textSize="14sp" />
+
+            <ImageView
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_arrow_drop_down"
+                app:tint="@android:color/white" />
+        </LinearLayout>
+
+        <ImageButton
+            android:id="@+id/liveCollapse"
+            android:layout_width="40dp"
+            android:layout_height="44dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/live_collapse"
+            android:src="@drawable/ic_chevron_right"
+            app:tint="@android:color/white" />
+
+        <ImageButton
+            android:id="@+id/liveStop"
+            android:layout_width="40dp"
+            android:layout_height="44dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/live_stop"
+            android:src="@drawable/ic_close"
+            app:tint="@android:color/white" />
+    </LinearLayout>
+
+    <!-- Collapsed tab on the right edge -->
+    <LinearLayout
+        android:id="@+id/liveExpand"
+        android:layout_width="wrap_content"
+        android:layout_height="48dp"
+        android:layout_marginVertical="8dp"
+        android:background="@drawable/bg_tab_left"
+        android:contentDescription="@string/live_expand"
+        android:elevation="6dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="6dp"
+        android:paddingEnd="10dp"
+        android:visibility="gone">
+
+        <ImageView
+            android:layout_width="22dp"
+            android:layout_height="22dp"
+            android:importantForAccessibility="no"
+            android:src="@drawable/ic_chevron_left"
+            app:tint="@android:color/white" />
+
+        <ImageView
+            android:layout_width="20dp"
+            android:layout_height="20dp"
+            android:importantForAccessibility="no"
+            android:src="@drawable/ic_translate"
+            app:tint="@android:color/white" />
+    </LinearLayout>
+</FrameLayout>

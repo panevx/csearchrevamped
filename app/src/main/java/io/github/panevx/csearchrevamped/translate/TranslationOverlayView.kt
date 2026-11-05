@@ -8,42 +8,54 @@ import android.graphics.Rect
 import android.graphics.RectF
 import android.text.StaticLayout
 import android.text.TextPaint
+import android.text.TextUtils
 import android.view.View
 import kotlin.math.max
 import kotlin.math.min
 
-/** Draws translated text boxes over the original text, positioned in screen coordinates. */
+/**
+ * Draws each translation exactly over the original text's bounds, at the original font size
+ * (shrunk only as much as needed to fit), in the original background and text colors when known.
+ */
 class TranslationOverlayView(context: Context) : View(context) {
 
-    /** [original] is used to estimate the on-screen font size so the translation matches it. */
-    data class Item(val bounds: Rect, val text: String, val original: String)
+    /**
+     * [original] is used to estimate the on-screen font size so the translation matches it.
+     * [background] and [foreground] are the colors sampled from the screen, or null if unknown.
+     */
+    data class Item(
+        val bounds: Rect,
+        val text: String,
+        val original: String,
+        val background: Int?,
+        val foreground: Int?,
+        /** How far right the box may grow without covering other text, icons or controls. */
+        val maxRight: Int,
+    )
 
-    private class Placed(val rect: RectF, val layout: StaticLayout)
+    private class Placed(val rect: RectF, val layout: StaticLayout, val background: Int)
 
     private val density = resources.displayMetrics.density
     private fun dp(v: Float) = v * density
 
     private val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
         Configuration.UI_MODE_NIGHT_YES
-    private val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = if (night) 0xFF202124.toInt() else 0xFFFFFFFF.toInt()
-    }
-    private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = if (night) 0xFFE8EAED.toInt() else 0xFF1F1F1F.toInt()
-    }
+    private val defaultBackground = if (night) 0xFF202124.toInt() else 0xFFFFFFFF.toInt()
+    private val defaultForeground = if (night) 0xFFE8EAED.toInt() else 0xFF1F1F1F.toInt()
+    private val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG)
     private val origin = IntArray(2)
-    private val pad = dp(3f)
-    private val minSize = dp(9f)
+    private val minSize = dp(7f)
+    private val pad = dp(2f)
     private var placed: List<Placed> = emptyList()
     private val cache = HashMap<String, Placed>()
 
     fun setItems(items: List<Item>) {
-        val screenWidth = resources.displayMetrics.widthPixels
         val used = HashMap<String, Placed>()
         placed = items.map { item ->
-            val key = "${item.bounds.flattenToString()}|${item.text}"
-            val p = cache[key]?.let { Placed(RectF(it.rect), it.layout) } ?: place(item, screenWidth)
-            used[key] = Placed(RectF(p.rect), p.layout)
+            val key = "${item.bounds.flattenToString()}|${item.text}|${item.background}|${item.foreground}|${item.maxRight}"
+            val p = cache[key]?.let { Placed(RectF(it.rect), it.layout, it.background) } ?: place(item)
+            used[key] = Placed(RectF(p.rect), p.layout, p.background)
             p
         }
         cache.clear()
@@ -66,10 +78,15 @@ class TranslationOverlayView(context: Context) : View(context) {
         invalidate()
     }
 
-    private fun build(text: String, size: Float, width: Int): StaticLayout {
-        val paint = TextPaint(textPaint).apply { textSize = size }
+    private fun build(text: String, size: Float, width: Int, color: Int, maxLines: Int = Int.MAX_VALUE): StaticLayout {
+        val paint = TextPaint(textPaint).apply {
+            textSize = size
+            this.color = color
+        }
         return StaticLayout.Builder.obtain(text, 0, text.length, paint, max(1, width))
             .setIncludePad(false)
+            .setMaxLines(maxLines)
+            .setEllipsize(if (maxLines == Int.MAX_VALUE) null else TextUtils.TruncateAt.END)
             .build()
     }
 
@@ -79,40 +96,48 @@ class TranslationOverlayView(context: Context) : View(context) {
         var hi = max(minSize, min(h.toFloat(), dp(40f)))
         repeat(7) {
             val mid = (lo + hi) / 2
-            if (build(original, mid, w).height <= h) lo = mid else hi = mid
+            if (build(original, mid, w, 0).height <= h) lo = mid else hi = mid
         }
         return lo
     }
 
-    private fun place(item: Item, screenWidth: Int): Placed {
-        val b = item.bounds
-        val w0 = max(1, b.width())
-        val h0 = max(1, b.height())
-        var size = originalSize(item.original, w0, h0)
-        // Grow sideways (up to the screen edge) before wrapping, since translations are often longer.
-        val maxWidth = max(w0, screenWidth - b.left - dp(8f).toInt())
-        textPaint.textSize = size
-        val width = min(maxWidth.toFloat(), max(w0.toFloat(), textPaint.measureText(item.text) + 1f)).toInt()
-        var layout = build(item.text, size, width)
-        while (layout.height > h0 * 1.5f && size > minSize) {
-            size = max(minSize, size * 0.92f)
-            layout = build(item.text, size, width)
+    private fun place(item: Item): Placed {
+        val w0 = max(1, item.bounds.width())
+        val h = max(1, item.bounds.height())
+        val color = item.foreground ?: defaultForeground
+
+        // Same spot and height as the original. A longer translation may first use free space to
+        // the right on the same line, then shrinks to fit.
+        var size = originalSize(item.original, w0, h)
+        var w = w0
+        if (build(item.text, size, w0, color).height > h) {
+            textPaint.textSize = size
+            val oneLine = textPaint.measureText(item.text).toInt() + 2
+            w = min(oneLine, item.maxRight - item.bounds.left).coerceAtLeast(w0)
         }
-        val height = max(h0, layout.height)
-        val rect = RectF(b.left - pad, b.top - pad, b.left + width + pad, b.top + height + pad)
-        return Placed(rect, layout)
+        val rect = RectF(item.bounds).apply { right = left + w; inset(-pad * 2, -pad) }
+        var layout = build(item.text, size, w, color)
+        while (layout.height > h && size > minSize) {
+            size = max(minSize, size * 0.92f)
+            layout = build(item.text, size, w, color)
+        }
+        if (layout.height > h) {
+            val lines = max(1, h / max(1, layout.height / max(1, layout.lineCount)))
+            layout = build(item.text, size, w, color, lines)
+        }
+        return Placed(rect, layout, item.background ?: defaultBackground)
     }
 
     override fun onDraw(canvas: Canvas) {
         getLocationOnScreen(origin)
         canvas.translate(-origin[0].toFloat(), -origin[1].toFloat())
-        val radius = dp(4f)
+        val radius = dp(2f)
         for (p in placed) {
+            boxPaint.color = p.background
             canvas.drawRoundRect(p.rect, radius, radius, boxPaint)
             canvas.save()
             canvas.clipRect(p.rect)
-            val top = p.rect.top + (p.rect.height() - p.layout.height) / 2f
-            canvas.translate(p.rect.left + pad, top)
+            canvas.translate(p.rect.left + pad * 2, p.rect.top + (p.rect.height() - p.layout.height) / 2f)
             p.layout.draw(canvas)
             canvas.restore()
         }

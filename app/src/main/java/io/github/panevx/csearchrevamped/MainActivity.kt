@@ -16,8 +16,8 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.isVisible
-import androidx.core.widget.doAfterTextChanged
 import io.github.panevx.csearchrevamped.tiles.CaptureTileService
+import io.github.panevx.csearchrevamped.translate.Languages
 import io.github.panevx.csearchrevamped.tiles.MusicTileService
 
 class MainActivity : AppCompatActivity() {
@@ -68,8 +68,12 @@ class MainActivity : AppCompatActivity() {
             setOnCheckedChangeListener { _, on -> Prefs.setAutoSearch(this@MainActivity, on) }
         }
         findViewById<EditText>(R.id.targetLang).apply {
-            setText(Prefs.targetLang(this@MainActivity))
-            doAfterTextChanged { Prefs.setTargetLang(this@MainActivity, it.toString()) }
+            setOnClickListener {
+                Languages.pick(this@MainActivity, Prefs.targetLang(this@MainActivity)) { code ->
+                    Prefs.setTargetLang(this@MainActivity, code)
+                    setText(Languages.name(code))
+                }
+            }
         }
     }
 
@@ -78,6 +82,8 @@ class MainActivity : AppCompatActivity() {
         setStatus(R.id.serviceStatus, isCaptureServiceEnabled(this))
         val assistant = getSystemService(RoleManager::class.java)?.isRoleHeld(RoleManager.ROLE_ASSISTANT) == true
         setStatus(R.id.assistStatus, assistant)
+        // The language can also be changed from the live translate bar.
+        findViewById<EditText>(R.id.targetLang).setText(Languages.name(Prefs.targetLang(this)))
     }
 
     private fun setStatus(id: Int, on: Boolean) {
