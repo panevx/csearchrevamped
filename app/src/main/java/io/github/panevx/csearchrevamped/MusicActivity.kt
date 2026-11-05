@@ -4,11 +4,13 @@ import android.Manifest
 import android.animation.ObjectAnimator
 import android.animation.PropertyValuesHolder
 import android.animation.ValueAnimator
+import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioFormat
+import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.widget.ImageView
@@ -18,18 +20,28 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.isVisible
 import androidx.lifecycle.lifecycleScope
+import io.github.panevx.csearchrevamped.music.SignatureGenerator
+import io.github.panevx.csearchrevamped.music.Song
+import io.github.panevx.csearchrevamped.music.SongRecognizer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
+import kotlin.coroutines.coroutineContext
 
 /** Listens through the microphone and identifies the song that is playing. */
 class MusicActivity : AppCompatActivity() {
 
     private companion object {
-        const val LISTEN_SECONDS = 10
+        const val SAMPLE_RATE = 16000
+        const val MAX_SECONDS = 12
+        /** Try a lookup after this many seconds of audio; more audio helps quiet or noisy rooms. */
+        val ATTEMPTS = intArrayOf(4, 8, 12)
+
+        const val SHAZAM_PACKAGE = "com.shazam.android"
+        const val GOOGLE_SONG_SEARCH = "com.google.android.googlequicksearchbox.MUSIC_SEARCH"
     }
 
     private lateinit var status: TextView
@@ -40,8 +52,10 @@ class MusicActivity : AppCompatActivity() {
     private lateinit var again: View
     private lateinit var pulse: ObjectAnimator
 
-    private var recorder: MediaRecorder? = null
+    private val audio = ShortArray(SAMPLE_RATE * MAX_SECONDS)
+    @Volatile private var recorded = 0
     private var job: Job? = null
+    private var recordJob: Job? = null
 
     private val askMic = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) listen() else showMessage(getString(R.string.mic_denied), "")
@@ -59,6 +73,7 @@ class MusicActivity : AppCompatActivity() {
         links = findViewById(R.id.links)
         again = findViewById(R.id.again)
         again.setOnClickListener { listen() }
+        setUpOtherApps()
 
         pulse = ObjectAnimator.ofPropertyValuesHolder(
             findViewById(R.id.pulse),
@@ -77,81 +92,110 @@ class MusicActivity : AppCompatActivity() {
 
     override fun onStop() {
         super.onStop()
-        if (recorder != null) {
-            job?.cancel()
-            stopRecording()
+        if (recordJob?.isActive == true) {
+            stopListening()
             showMessage(getString(R.string.song_search), "")
         }
     }
 
-    override fun onDestroy() {
-        stopRecording()
-        super.onDestroy()
+    /** Offers Shazam and Google's song search as alternatives when those apps are installed. */
+    private fun setUpOtherApps() {
+        val shazam = packageManager.getLaunchIntentForPackage(SHAZAM_PACKAGE)
+        val google = Intent(GOOGLE_SONG_SEARCH).takeIf { it.resolveActivity(packageManager) != null }
+        findViewById<View>(R.id.otherApps).isVisible = shazam != null || google != null
+        findViewById<View>(R.id.useShazam).apply {
+            isVisible = shazam != null
+            setOnClickListener { handOff(shazam!!) }
+        }
+        findViewById<View>(R.id.useGoogle).apply {
+            isVisible = google != null
+            setOnClickListener { handOff(google!!) }
+        }
+    }
+
+    private fun handOff(intent: Intent) {
+        // Free the microphone so the other app can use it.
+        stopListening()
+        runCatching { startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+        finish()
+    }
+
+    private fun stopListening() {
+        job?.cancel()
+        recordJob?.cancel()
     }
 
     private fun listen() {
-        job?.cancel()
+        stopListening()
         listenGroup.isVisible = true
         art.isVisible = false
         links.isVisible = false
         again.isVisible = false
         status.setText(R.string.listening)
+        sub.setText(R.string.listening_sub)
         pulse.start()
 
+        recorded = 0
+        recordJob = lifecycleScope.launch(Dispatchers.IO) { record() }
         job = lifecycleScope.launch {
-            val file = File(cacheDir, "song.m4a")
-            try {
-                startRecording(file)
-            } catch (e: Exception) {
-                stopRecording()
-                showMessage(getString(R.string.mic_error), e.message.orEmpty())
-                return@launch
+            var lastError: String? = null
+            for (seconds in ATTEMPTS) {
+                while (recorded < seconds * SAMPLE_RATE) {
+                    if (recordJob?.isActive != true) break
+                    delay(100)
+                }
+                val length = recorded
+                if (length < SAMPLE_RATE) {
+                    showMessage(getString(R.string.mic_error), "")
+                    return@launch
+                }
+                if (seconds == ATTEMPTS.last()) status.setText(R.string.identifying)
+                val result = withContext(Dispatchers.Default) {
+                    runCatching {
+                        val signature = SignatureGenerator().apply { feed(audio, 0, length) }
+                        SongRecognizer.identify(signature)
+                    }
+                }
+                val song = result.getOrNull()
+                if (song != null) {
+                    recordJob?.cancel()
+                    showSong(song)
+                    return@launch
+                }
+                lastError = result.exceptionOrNull()?.message
+                if (recordJob?.isActive != true) break
             }
-            for (s in LISTEN_SECONDS downTo 1) {
-                sub.text = getString(R.string.listening_sub, s)
-                delay(1000)
-            }
-            stopRecording()
-            status.setText(R.string.identifying)
-            sub.text = ""
-
-            val token = Prefs.auddToken(this@MusicActivity)
-            val result = withContext(Dispatchers.IO) { runCatching { SongRecognizer.identify(file, token) } }
-            file.delete()
-            result.fold(
-                onSuccess = { song ->
-                    if (song == null) showMessage(getString(R.string.not_found), getString(R.string.not_found_sub))
-                    else showSong(song)
-                },
-                onFailure = { e ->
-                    val code = (e as? RecognitionException)?.code
-                    val msg = if (code == 900 || code == 901) getString(R.string.audd_token_hint) else e.message.orEmpty()
-                    showMessage(getString(R.string.not_found), msg)
-                },
-            )
+            recordJob?.cancel()
+            if (lastError != null) showMessage(getString(R.string.not_found), lastError)
+            else showMessage(getString(R.string.not_found), getString(R.string.not_found_sub))
         }
     }
 
-    private fun startRecording(file: File) {
-        val r = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(this)
-        else @Suppress("DEPRECATION") MediaRecorder()
-        recorder = r
-        r.setAudioSource(MediaRecorder.AudioSource.MIC)
-        r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-        r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-        r.setAudioSamplingRate(44100)
-        r.setAudioEncodingBitRate(128_000)
-        r.setAudioChannels(1)
-        r.setOutputFile(file.absolutePath)
-        r.prepare()
-        r.start()
-    }
-
-    private fun stopRecording() {
-        val r = recorder ?: return
-        recorder = null
-        runCatching { r.stop() }
-        r.release()
+    @SuppressLint("MissingPermission") // checked before listen() runs
+    private suspend fun record() {
+        val minBuffer = AudioRecord.getMinBufferSize(
+            SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
+        )
+        val recorder = try {
+            AudioRecord(
+                MediaRecorder.AudioSource.MIC, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuffer, SAMPLE_RATE)
+            )
+        } catch (_: Exception) {
+            return
+        }
+        try {
+            if (recorder.state != AudioRecord.STATE_INITIALIZED) return
+            recorder.startRecording()
+            while (coroutineContext.isActive && recorded < audio.size) {
+                val n = recorder.read(audio, recorded, minOf(SAMPLE_RATE / 10, audio.size - recorded))
+                if (n < 0) break
+                recorded += n
+            }
+        } finally {
+            runCatching { recorder.stop() }
+            recorder.release()
+        }
     }
 
     private fun showMessage(title: String, detail: String) {
@@ -166,7 +210,7 @@ class MusicActivity : AppCompatActivity() {
         listenGroup.isVisible = false
         status.text = song.title
         sub.text = listOfNotNull(
-            song.artist.takeIf { it.isNotBlank() }, song.album, song.releaseDate?.take(4)
+            song.artist.takeIf { it.isNotBlank() }, song.album, song.releaseDate
         ).joinToString(" · ")
         links.isVisible = true
         again.isVisible = true

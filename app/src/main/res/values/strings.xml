@@ -27,13 +27,15 @@
     <string name="no_screenshot">Turn on "Use screenshot" in the assistant settings, or enable the accessibility service</string>
 
     <string name="listening">Listening…</string>
-    <string name="listening_sub">Play or hum near the mic · %1$ds</string>
+    <string name="listening_sub">Hold your phone near the music</string>
     <string name="identifying">Identifying…</string>
     <string name="not_found">No match found</string>
     <string name="not_found_sub">Try again closer to the speaker</string>
     <string name="mic_denied">Microphone permission is needed for song search</string>
     <string name="mic_error">Could not start the microphone</string>
-    <string name="audd_token_hint">The free anonymous limit was reached. Add a free AudD API token in CSearch Revamped settings.</string>
+    <string name="also_try">Also try</string>
+    <string name="shazam">Shazam</string>
+    <string name="google_song_search">Google</string>
     <string name="listen_again">Listen again</string>
     <string name="open_song">Open</string>
     <string name="youtube">YouTube</string>
@@ -55,6 +57,4 @@
     <string name="try_now">Try screen search</string>
     <string name="settings_title">Settings</string>
     <string name="translate_to">Translate to (language code, e.g. en, bg, de)</string>
-    <string name="audd_token">AudD API token for song search (optional)</string>
-    <string name="audd_token_help">Song search uses the AudD recognition API. It works a few times a day without a token; get a free token at dashboard.audd.io for more.</string>
 </resources>

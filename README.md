@@ -1,6 +1,6 @@
 # CSearch Revamped
 
-Circle anything on your Android screen to search it with Google Lens image search, translate it, or copy its text. You don't need the Google app. CSearch Revamped also identifies songs playing around you.
+Circle anything on your Android screen to search it with Google Lens image search, translate it, or copy its text. You don't need the Google app. CSearch Revamped also identifies songs playing around you, for free and without an account or the Shazam app.
 
 ## Features
 
@@ -8,7 +8,7 @@ Circle anything on your Android screen to search it with Google Lens image searc
 - **Translate.** On-device OCR reads the selected text (Latin, Chinese, Japanese, Korean and Devanagari scripts), then Google Translate opens with your chosen target language.
 - **Text.** Copy, edit, search or translate the text in the selection.
 - **Share.** Send the cropped selection to any app.
-- **Song search.** Listen for 10 seconds and identify the song with [AudD](https://audd.io), with links to YouTube and Spotify.
+- **Song search.** Hold your phone near the music. The app makes a Shazam-compatible audio fingerprint on the device and looks it up, usually within 4 seconds. Results include the album, year, cover art and links to Shazam, YouTube and Spotify. If Shazam or the Google app is installed, the sheet also offers to hand off to them.
 
 ## Ways to start a search
 
@@ -26,10 +26,6 @@ The accessibility service is what takes screenshots without asking for screen-re
 
 Download `csearchrevamped.apk` from the [latest release](../../releases/latest) and install it. Requires Android 11 or newer and Google Play services (for the OCR models).
 
-## Song search token
-
-AudD allows a few anonymous recognitions per day. For more, create a free token at [dashboard.audd.io](https://dashboard.audd.io) and paste it into the app's settings.
-
 ## Build
 
 ```sh
@@ -40,10 +36,10 @@ Or open the project in Android Studio. To build releases automatically, copy `do
 
 ## Privacy
 
-Screenshots stay in memory and are only uploaded when you press **Search** (sent to Google Lens) or **Translate** (only the recognised text is sent to Google Translate). Song search uploads a 10 second recording to AudD.
+Screenshots stay in memory and are only uploaded when you press **Search** (sent to Google Lens) or **Translate** (only the recognised text is sent to Google Translate). Song search never uploads audio: only the fingerprint (peak frequencies, not a recording) is sent to Shazam's recognition service.
 
-Not affiliated with Google.
+Not affiliated with Google or Shazam/Apple.
 
 ## License
 
-MIT
+GPL-3.0. The audio fingerprint generator is a Kotlin port of [SongRec](https://github.com/marin-m/SongRec) by marin-m (GPL-3.0).

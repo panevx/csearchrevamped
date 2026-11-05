@@ -62,10 +62,6 @@ class MainActivity : AppCompatActivity() {
             setText(Prefs.targetLang(this@MainActivity))
             doAfterTextChanged { Prefs.setTargetLang(this@MainActivity, it.toString()) }
         }
-        findViewById<EditText>(R.id.auddToken).apply {
-            setText(Prefs.auddToken(this@MainActivity))
-            doAfterTextChanged { Prefs.setAuddToken(this@MainActivity, it.toString()) }
-        }
     }
 
     override fun onResume() {

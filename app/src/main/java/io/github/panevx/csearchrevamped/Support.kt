@@ -17,9 +17,6 @@ object ScreenshotHolder {
 object Prefs {
     private fun prefs(c: Context) = c.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
-    fun auddToken(c: Context): String = prefs(c).getString("audd_token", "").orEmpty()
-    fun setAuddToken(c: Context, v: String) = prefs(c).edit().putString("audd_token", v.trim()).apply()
-
     fun targetLang(c: Context): String =
         prefs(c).getString("target_lang", null)?.takeIf { it.isNotBlank() } ?: Locale.getDefault().language
     fun setTargetLang(c: Context, v: String) = prefs(c).edit().putString("target_lang", v.trim()).apply()
