@@ -4,8 +4,8 @@ Circle anything on your Android screen to search it with Google Lens image searc
 
 ## Features
 
-- **Circle to search.** Freeze the screen, then circle, scribble or tap anything. The selection is sent to Google Lens on the web, and the results open in a sheet inside the app.
-- **Translate.** On-device OCR reads the selected text (Latin, Chinese, Japanese, Korean and Devanagari scripts), then Google Translate opens with your chosen target language.
+- **Circle to search.** Freeze the screen, then circle or scribble over anything to search it right away with Google Lens on the web. The results open in a sheet inside the app. A tap only highlights an area, and accidental flicks or jitters are ignored, so a misclick never starts a search. You'll feel a light vibration when you touch down and when a selection locks in.
+- **Live translate.** Translations appear on top of the app's own text, and you can keep scrolling while new text is translated as it appears. Translation runs on your device with ML Kit, so it's free and works offline after a one-time language download (about 30 MB per language). Tap ✕ on the floating bar to stop.
 - **Text.** Copy, edit, search or translate the text in the selection.
 - **Share.** Send the cropped selection to any app.
 - **Song search.** Hold your phone near the music. The app makes a Shazam-compatible audio fingerprint on the device and looks it up, usually within 4 seconds. Results include the album, year, cover art and links to Shazam, YouTube and Spotify. If Shazam or the Google app is installed, the sheet also offers to hand off to them.
@@ -18,7 +18,7 @@ Circle anything on your Android screen to search it with Google Lens image searc
 | Quick Settings tile | Add the **Screen search** and **Song search** tiles |
 | Accessibility button / shortcut | Enable the CSearch Revamped accessibility service |
 
-The accessibility service is what takes screenshots without asking for screen-recording permission on every search. It only captures when you trigger a search, and it doesn't read window content.
+The accessibility service is what takes screenshots without asking for screen-recording permission on every search. It only captures when you trigger a search. It reads on-screen text only while live translate is on, and that text never leaves your phone.
 
 > **Android 13+ sideloading:** if the accessibility toggle is greyed out ("restricted setting"), open *App info → ⋮ → Allow restricted settings*, then try again.
 
@@ -36,7 +36,7 @@ Or open the project in Android Studio. To build releases automatically, copy `do
 
 ## Privacy
 
-Screenshots stay in memory and are only uploaded when you press **Search** (sent to Google Lens) or **Translate** (only the recognised text is sent to Google Translate). Song search never uploads audio: only the fingerprint (peak frequencies, not a recording) is sent to Shazam's recognition service.
+Screenshots stay in memory and are only uploaded when you search (sent to Google Lens). Live translate happens entirely on your device. Song search never uploads audio: only the fingerprint (peak frequencies, not a recording) is sent to Shazam's recognition service.
 
 Not affiliated with Google or Shazam/Apple.
 

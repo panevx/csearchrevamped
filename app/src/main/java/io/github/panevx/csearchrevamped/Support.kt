@@ -20,6 +20,9 @@ object Prefs {
     fun targetLang(c: Context): String =
         prefs(c).getString("target_lang", null)?.takeIf { it.isNotBlank() } ?: Locale.getDefault().language
     fun setTargetLang(c: Context, v: String) = prefs(c).edit().putString("target_lang", v.trim()).apply()
+
+    fun autoSearch(c: Context): Boolean = prefs(c).getBoolean("auto_search", true)
+    fun setAutoSearch(c: Context, v: Boolean) = prefs(c).edit().putBoolean("auto_search", v).apply()
 }
 
 object Links {

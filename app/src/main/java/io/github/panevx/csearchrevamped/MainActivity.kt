@@ -4,14 +4,17 @@ import android.app.StatusBarManager
 import android.app.role.RoleManager
 import android.content.ComponentName
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.widget.CompoundButton
 import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.isVisible
 import androidx.core.widget.doAfterTextChanged
 import io.github.panevx.csearchrevamped.tiles.CaptureTileService
@@ -22,6 +25,8 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+        WindowInsetsControllerCompat(window, window.decorView).isAppearanceLightStatusBars = !night
 
         findViewById<android.view.View>(R.id.btn_step_service_button).setOnClickListener {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
@@ -58,6 +63,10 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(this, MusicActivity::class.java))
         }
 
+        findViewById<CompoundButton>(R.id.autoSearch).apply {
+            isChecked = Prefs.autoSearch(this@MainActivity)
+            setOnCheckedChangeListener { _, on -> Prefs.setAutoSearch(this@MainActivity, on) }
+        }
         findViewById<EditText>(R.id.targetLang).apply {
             setText(Prefs.targetLang(this@MainActivity))
             doAfterTextChanged { Prefs.setTargetLang(this@MainActivity, it.toString()) }

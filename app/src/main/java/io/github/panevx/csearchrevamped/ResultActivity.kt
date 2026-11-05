@@ -153,7 +153,7 @@ class ResultActivity : AppCompatActivity() {
             val host = Uri.parse(url).host.orEmpty()
             if (host.startsWith("consent.")) {
                 sawConsent = true
-            } else if (sawConsent && image != null && host.endsWith("google.com")) {
+            } else if (sawConsent && image != null) {
                 // The consent screen swallowed the upload; redo it now that cookies are set.
                 sawConsent = false
                 view.stopLoading()

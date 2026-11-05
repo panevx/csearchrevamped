@@ -10,6 +10,7 @@ import android.os.Looper
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.widget.Toast
+import io.github.panevx.csearchrevamped.translate.LiveTranslator
 
 /**
  * Takes the screenshot that the overlay lets you circle. Uses the accessibility screenshot API
@@ -23,6 +24,7 @@ class CaptureService : AccessibilityService() {
     }
 
     private val handler = Handler(Looper.getMainLooper())
+    private var live: LiveTranslator? = null
 
     override fun onServiceConnected() {
         instance = this
@@ -33,20 +35,38 @@ class CaptureService : AccessibilityService() {
         )
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event != null) live?.onEvent(event)
+    }
     override fun onInterrupt() {}
 
     override fun onUnbind(intent: Intent?): Boolean {
+        stopLiveTranslate()
         instance = null
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
+        stopLiveTranslate()
         instance = null
         super.onDestroy()
     }
 
+    /** Translates the app on screen in place, following along as the user scrolls. */
+    fun startLiveTranslate(delayMs: Long = 0) {
+        stopLiveTranslate()
+        handler.postDelayed({
+            live = LiveTranslator(this) { live = null }.also { it.start() }
+        }, delayMs)
+    }
+
+    fun stopLiveTranslate() {
+        live?.stop()
+        live = null
+    }
+
     fun capture(delayMs: Long = 0, dismissShade: Boolean = false) {
+        stopLiveTranslate()
         if (dismissShade) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 performGlobalAction(GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE)

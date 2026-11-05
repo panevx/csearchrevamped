@@ -1,12 +1,18 @@
 <resources>
     <string name="app_name">CSearch Revamped</string>
     <string name="a11y_label">CSearch Revamped screen search</string>
-    <string name="a11y_description">Lets CSearch Revamped take a screenshot when you tap the accessibility button, the Quick Settings tile or the assistant gesture, so you can circle something and search it. Nothing is captured unless you trigger it.</string>
+    <string name="a11y_description">Lets CSearch Revamped take a screenshot when you tap the accessibility button, the Quick Settings tile or the assistant gesture, so you can circle something and search it. Live translate reads the text on screen only while it is turned on, and translates it on your device. Nothing is captured unless you trigger it.</string>
     <string name="tile_capture">Screen search</string>
     <string name="tile_music">Song search</string>
 
     <string name="hint_draw">Circle or tap anything to search</string>
     <string name="hint_selected">Search, translate or copy the selection</string>
+    <string name="hint_rejected">Circle a little bigger to search</string>
+    <string name="live_translating">Translating to %1$s · scroll freely</string>
+    <string name="live_downloading">Downloading %1$s → %2$s (one time)…</string>
+    <string name="live_stop">Stop translating</string>
+    <string name="auto_search">Search as soon as you circle</string>
+    <string name="auto_search_help">Circles and scribbles search right away. A tap only highlights, and accidental flicks are ignored.</string>
     <string name="action_search">Search</string>
     <string name="action_translate">Translate</string>
     <string name="action_text">Text</string>

@@ -5,9 +5,12 @@
 
     <style name="Theme.CSearch.Overlay" parent="Theme.Material3.Dark.NoActionBar">
         <item name="colorPrimary">#B9A8FF</item>
-        <item name="android:windowBackground">@android:color/black</item>
-        <item name="android:windowFullscreen">true</item>
+        <!-- Translucent: no splash/black frame before the frozen screenshot is drawn -->
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:enforceStatusBarContrast">false</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
         <item name="android:windowAnimationStyle">@null</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>

@@ -3,7 +3,7 @@
     android:accessibilityEventTypes="typeAnnouncement"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagRequestAccessibilityButton"
-    android:canRetrieveWindowContent="false"
+    android:canRetrieveWindowContent="true"
     android:canTakeScreenshot="true"
     android:description="@string/a11y_description"
     android:notificationTimeout="1000"

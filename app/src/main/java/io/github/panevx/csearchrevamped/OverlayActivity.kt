@@ -7,14 +7,18 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.os.Bundle
 import android.view.View
+import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.addCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.updateLayoutParams
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.isVisible
 import androidx.lifecycle.lifecycleScope
@@ -36,6 +40,9 @@ class OverlayActivity : AppCompatActivity() {
     private lateinit var shot: Bitmap
     private lateinit var selection: SelectionView
     private lateinit var progress: View
+    private lateinit var hint: TextView
+    private val autoSearch = Runnable { if (!isFinishing) openLens() }
+    private val restoreHint = Runnable { hint.setText(R.string.hint_draw) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -50,24 +57,54 @@ class OverlayActivity : AppCompatActivity() {
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
         setContentView(R.layout.activity_overlay)
-        WindowInsetsControllerCompat(window, window.decorView).apply {
-            hide(WindowInsetsCompat.Type.systemBars())
-            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        }
+        // Keep the (transparent) system bars: the screenshot behind them already shows the same icons.
+        WindowInsetsControllerCompat(window, window.decorView).isAppearanceLightStatusBars = false
 
         progress = findViewById(R.id.progress)
-        val hint = findViewById<TextView>(R.id.hint)
+        val topBar = findViewById<View>(R.id.topBar)
+        val actions = findViewById<View>(R.id.actions)
+        val gap = (12 * resources.displayMetrics.density).toInt()
+        ViewCompat.setOnApplyWindowInsetsListener(window.decorView) { _, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            topBar.updateLayoutParams<ViewGroup.MarginLayoutParams> { topMargin = bars.top + gap }
+            actions.updateLayoutParams<ViewGroup.MarginLayoutParams> { bottomMargin = bars.bottom + gap * 2 }
+            insets
+        }
+        hint = findViewById(R.id.hint)
         selection = findViewById(R.id.selection)
         selection.bitmap = shot
-        selection.onSelectionChanged = { hint.setText(R.string.hint_selected) }
+        selection.onGestureStart = {
+            selection.removeCallbacks(autoSearch)
+            hint.removeCallbacks(restoreHint)
+        }
+        selection.onSelected = { deliberate ->
+            hint.setText(R.string.hint_selected)
+            // Let the selection animation finish before the results sheet slides up.
+            if (deliberate && Prefs.autoSearch(this)) selection.postDelayed(autoSearch, 380)
+        }
+        selection.onRejected = {
+            hint.setText(R.string.hint_rejected)
+            hint.postDelayed(restoreHint, 1800)
+        }
+        Haptics.click(this)
 
-        findViewById<View>(R.id.close).setOnClickListener { finish() }
+        findViewById<View>(R.id.close).setOnClickListener { dismiss() }
+        onBackPressedDispatcher.addCallback(this) { dismiss() }
         findViewById<View>(R.id.music).setOnClickListener {
+            Haptics.tick(this)
             startActivity(Intent(this, MusicActivity::class.java))
         }
-        findViewById<View>(R.id.actionSearch).setOnClickListener { openLens() }
-        findViewById<View>(R.id.actionShare).setOnClickListener { share() }
+        findViewById<View>(R.id.actionSearch).setOnClickListener { Haptics.tick(this); openLens() }
+        findViewById<View>(R.id.actionShare).setOnClickListener { Haptics.tick(this); share() }
         findViewById<View>(R.id.actionTranslate).setOnClickListener {
+            Haptics.tick(this)
+            val service = CaptureService.instance
+            if (service != null) {
+                // Live translate works on the real app underneath, so the frozen screenshot goes away.
+                finishAndRemoveTask()
+                service.startLiveTranslate(delayMs = 300)
+                return@setOnClickListener
+            }
             withText { text ->
                 if (text.isEmpty()) {
                     Toast.makeText(this, R.string.no_text_lens, Toast.LENGTH_SHORT).show()
@@ -78,11 +115,18 @@ class OverlayActivity : AppCompatActivity() {
             }
         }
         findViewById<View>(R.id.actionText).setOnClickListener {
+            Haptics.tick(this)
             withText { text ->
                 if (text.isEmpty()) Toast.makeText(this, R.string.no_text, Toast.LENGTH_SHORT).show()
                 else showText(text)
             }
         }
+    }
+
+    /** Fades the overlay out instead of cutting away. */
+    private fun dismiss() {
+        selection.removeCallbacks(autoSearch)
+        window.decorView.animate().alpha(0f).setDuration(160).withEndAction { finish() }.start()
     }
 
     override fun finish() {

@@ -15,6 +15,9 @@ android {
         targetSdk = 35
         versionCode = (System.getenv("VERSION_CODE") ?: "1").toInt()
         versionName = System.getenv("VERSION_NAME") ?: "1.0.0"
+
+        // Phones are ARM; dropping x86 builds of ML Kit's native libraries keeps the APK small.
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
 
     signingConfigs {
@@ -53,6 +56,10 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // On-device live translation
+    implementation("com.google.mlkit:translate:17.0.3")
+    implementation("com.google.mlkit:language-id:17.0.6")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")

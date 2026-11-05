@@ -191,7 +191,7 @@
             style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="32dp"
+            android:layout_marginBottom="12dp"
             android:hint="@string/translate_to">
 
             <com.google.android.material.textfield.TextInputEditText
@@ -201,5 +201,18 @@
                 android:inputType="text"
                 android:maxLines="1" />
         </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/autoSearch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/auto_search" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="32dp"
+            android:text="@string/auto_search_help"
+            android:textAppearance="?attr/textAppearanceBodySmall" />
     </LinearLayout>
 </ScrollView>
