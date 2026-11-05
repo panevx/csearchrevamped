@@ -2,10 +2,12 @@ package io.github.panevx.csearchrevamped.translate
 
 import android.content.Context
 import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
+import android.graphics.Typeface
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
@@ -30,6 +32,7 @@ class TranslationOverlayView(context: Context) : View(context) {
         val centered: Boolean,
         /** Where the letters are, relative to the bounds; null if the bounds changed since measuring. */
         val area: Rect?,
+        val bold: Boolean = false,
     )
 
     /**
@@ -49,6 +52,9 @@ class TranslationOverlayView(context: Context) : View(context) {
         /** Things on top of the original (pop-ups, banners, buttons): never paint over them. */
         val covers: List<Rect> = emptyList(),
         val ink: Ink? = null,
+        /** The original background with the letters painted out, drawn at [patchRect] (screen coords). */
+        val patch: Bitmap? = null,
+        val patchRect: Rect? = null,
     )
 
     private class Placed(
@@ -58,6 +64,8 @@ class TranslationOverlayView(context: Context) : View(context) {
         val textTop: Float,
         val background: Int,
         var covers: List<Rect> = emptyList(),
+        var patch: Bitmap? = null,
+        var patchRect: Rect? = null,
     )
 
     private val density = resources.displayMetrics.density
@@ -68,6 +76,7 @@ class TranslationOverlayView(context: Context) : View(context) {
     private val defaultBackground = if (night) 0xFF202124.toInt() else 0xFFFFFFFF.toInt()
     private val defaultForeground = if (night) 0xFFE8EAED.toInt() else 0xFF1F1F1F.toInt()
     private val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG)
     private val origin = IntArray(2)
     private val minSize = dp(7f)
@@ -87,10 +96,10 @@ class TranslationOverlayView(context: Context) : View(context) {
         placed = items.map { item ->
             val ink = item.ink
             val key = "${item.bounds.flattenToString()}|${item.text}|${item.background}|${item.foreground}|" +
-                "${item.maxRight}|${item.cut}|$typical|${ink?.textSize}|${ink?.area}"
+                "${item.maxRight}|${item.cut}|$typical|${ink?.textSize}|${ink?.area}|${ink?.bold}"
             val p = cache[key] ?: place(item, typical)
             used[key] = p
-            Placed(p.rect, p.layout, p.textLeft, p.textTop, p.background, item.covers)
+            Placed(p.rect, p.layout, p.textLeft, p.textTop, p.background, item.covers, item.patch, item.patchRect)
         }
         cache.clear()
         cache.putAll(used)
@@ -105,10 +114,12 @@ class TranslationOverlayView(context: Context) : View(context) {
         spacing: Float = 1f,
         centered: Boolean = false,
         maxLines: Int = Int.MAX_VALUE,
+        bold: Boolean = false,
     ): StaticLayout {
         val paint = TextPaint(textPaint).apply {
             textSize = size
             this.color = color
+            typeface = if (bold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
         }
         return StaticLayout.Builder.obtain(text, 0, text.length, paint, max(1, width))
             .setIncludePad(false)
@@ -143,6 +154,7 @@ class TranslationOverlayView(context: Context) : View(context) {
         val rect = RectF(b).apply { inset(-pad * 2, -pad) }
         val background = item.background ?: defaultBackground
         val centered = ink?.centered == true
+        val bold = ink?.bold == true
 
         // Font size: measured from the letters when possible (never larger than what fits the box).
         val fit = if (item.cut == 0) originalSize(item.original, w0, h) else Float.MAX_VALUE
@@ -166,7 +178,7 @@ class TranslationOverlayView(context: Context) : View(context) {
         if (item.cut != 0) {
             // Only part of the original is visible: anchor the translation to the visible edge;
             // the rest is clipped like the original.
-            val layout = build(item.text, size, w, color, spacing, centered)
+            val layout = build(item.text, size, w, color, spacing, centered, bold = bold)
             val top = if (item.cut > 0) {
                 b.top + (ink?.area?.top?.toFloat() ?: 0f) - size * 0.2f
             } else {
@@ -175,23 +187,23 @@ class TranslationOverlayView(context: Context) : View(context) {
             return Placed(rect, layout, b.left + inset, top, background)
         }
 
-        var layout = build(item.text, size, w, color, spacing, centered)
+        var layout = build(item.text, size, w, color, spacing, centered, bold = bold)
         if (layout.height > h && !centered) {
             // Longer than the original: use free space to the right on the same line first.
             textPaint.textSize = size
             val oneLine = textPaint.measureText(item.text).toInt() + 2
             w = min(oneLine, (item.maxRight - b.left - inset).toInt()).coerceAtLeast(w)
-            layout = build(item.text, size, w, color, spacing, centered)
+            layout = build(item.text, size, w, color, spacing, centered, bold = bold)
             rect.right = max(rect.right, b.left + inset + w + pad * 2)
         }
         // Then shrink until it fits the original's height.
         while (layout.height > h && size > minSize) {
             size = max(minSize, size * 0.93f)
-            layout = build(item.text, size, w, color, 1f, centered)
+            layout = build(item.text, size, w, color, 1f, centered, bold = bold)
         }
         if (layout.height > h) {
             val lines = max(1, h / max(1, layout.height / max(1, layout.lineCount)))
-            layout = build(item.text, size, w, color, 1f, centered, lines)
+            layout = build(item.text, size, w, color, 1f, centered, lines, bold = bold)
         }
 
         // Vertically centre on where the original letters were (or on the box).
@@ -210,8 +222,15 @@ class TranslationOverlayView(context: Context) : View(context) {
         for (p in placed) {
             canvas.save()
             for (c in p.covers) canvas.clipOutRect(c)
-            boxPaint.color = p.background
-            canvas.drawRoundRect(p.rect, radius, radius, boxPaint)
+            val patch = p.patch
+            val patchRect = p.patchRect
+            if (patch != null && patchRect != null) {
+                // The real background with the original letters painted out: no box at all.
+                canvas.drawBitmap(patch, null, patchRect, bitmapPaint)
+            } else {
+                boxPaint.color = p.background
+                canvas.drawRoundRect(p.rect, radius, radius, boxPaint)
+            }
             canvas.clipRect(p.rect)
             canvas.translate(p.textLeft, p.textTop)
             p.layout.draw(canvas)

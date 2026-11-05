@@ -65,7 +65,9 @@ dependencies {
     testImplementation("org.json:json:20240303")
 
     // On-device OCR (models delivered through Google Play services, keeps the APK small)
-    implementation("com.google.android.gms:play-services-mlkit-text-recognition:19.0.1")
+    // Latin-script OCR is built into the app so live translate can read the screen right away;
+    // the other scripts are delivered through Google Play services.
+    implementation("com.google.mlkit:text-recognition:16.0.1")
     implementation("com.google.android.gms:play-services-mlkit-text-recognition-chinese:16.0.1")
     implementation("com.google.android.gms:play-services-mlkit-text-recognition-japanese:16.0.1")
     implementation("com.google.android.gms:play-services-mlkit-text-recognition-korean:16.0.1")

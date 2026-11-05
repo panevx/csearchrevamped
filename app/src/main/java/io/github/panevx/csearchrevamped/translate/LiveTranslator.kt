@@ -30,6 +30,9 @@ import com.google.mlkit.nl.translate.TranslateLanguage
 import com.google.mlkit.nl.translate.Translation
 import com.google.mlkit.nl.translate.Translator
 import com.google.mlkit.nl.translate.TranslatorOptions
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import io.github.panevx.csearchrevamped.Haptics
 import io.github.panevx.csearchrevamped.Prefs
 import io.github.panevx.csearchrevamped.R
@@ -79,6 +82,10 @@ class LiveTranslator(
         const val REFRESH_DELAY_MS = 120L
         const val MAX_REFRESH_LATENCY_MS = 400L
         const val SCREENSHOT_INTERVAL_MS = 1050L
+        /** Share of a line's area covered by ink above which text counts as bold. */
+        const val BOLD_FILL = 0.355f
+        /** OCR lines below this confidence (noise in photos, logos) are left alone. */
+        const val OCR_CONFIDENCE = 0.6f
         /** How long scrolling must have stopped before translating the new position. */
         const val SCROLL_SETTLE_MS = 220L
     }
@@ -98,7 +105,18 @@ class LiveTranslator(
     /** Original text to translation; "" means leave it as it is. */
     private val cache = LruCache<String, String>(1500)
     /** Measurements (colors, font size, layout) per text and visible size; see [measureKey]. */
-    private val colors = LruCache<String, IntArray>(1500)
+    private val colors = object : LruCache<String, Measure>(48 * 1024) {
+        override fun sizeOf(key: String, value: Measure) = 1 + (value.patch?.byteCount ?: 0) / 1024
+    }
+
+    /**
+     * What was measured for a block. [v] holds: background, text color, font size px, lines,
+     * ink left/top/right/bottom (relative to the bounds), centered, line pitch, bounds width,
+     * bounds height, visible top, visible bottom (relative), grow limit (absolute x), bold.
+     * [patch] is the original background with the letters painted out (for non-flat backgrounds),
+     * covering [patchRect] relative to the bounds.
+     */
+    private class Measure(val v: IntArray, val patch: Bitmap?, val patchRect: Rect?)
 
     private var overlay: TranslationOverlayView? = null
     private var bar: View? = null
@@ -112,11 +130,26 @@ class LiveTranslator(
     private var stopped = false
     private val refreshRunnable = Runnable { refresh() }
 
+    /**
+     * Text read from the screenshot (OCR), like Google's Circle to Search: covers text the app
+     * doesn't report to Android (many web pages) and text inside images. Read again after each scroll.
+     */
+    private val ocr by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
+    private var ocrBlocks: List<TextBlock> = emptyList()
+    /** Web pages and images on screen: the only places OCR results are used (never app controls). */
+    private val readableAreas = ArrayList<Rect>()
+    /** Images and their descriptions: OCR text matching the description is a logo, kept as it is. */
+    private val imageLabels = ArrayList<Pair<Rect, String>>()
+    private var ocrDone = false
+
     /** While the user scrolls, translations are hidden; they come back once scrolling stops. */
     private var scrolling = false
     private val settleRunnable = Runnable {
         scrolling = false
         pendingSince = 0L
+        // What was read from the screen belongs to the old scroll position.
+        ocrBlocks = emptyList()
+        ocrDone = false
         refresh()
         overlay?.animate()?.alpha(1f)?.setDuration(140)?.start()
     }
@@ -162,6 +195,7 @@ class LiveTranslator(
         bar?.let { runCatching { wm.removeView(it) } }
         translators.values.forEach { it.close() }
         langId.close()
+        runCatching { ocr.close() }
         onClosed()
     }
 
@@ -220,10 +254,14 @@ class LiveTranslator(
         val obstacles = ArrayList<Rect>()
         val shapes = ArrayList<Shape>()
         order = 0
+        readableAreas.clear()
+        imageLabels.clear()
         collect(root, screen, screen, screen, found, obstacles, shapes, 0, 0, 0)
-        val merged = mergeFragments(found)
-        limitGrowth(merged, obstacles, screen)
-        findCovers(merged, shapes)
+        val fromTree = mergeFragments(found)
+        limitGrowth(fromTree, obstacles, screen)
+        findCovers(fromTree, shapes)
+        // Add what OCR read on screen that the app didn't report (or that's inside images).
+        val merged = fromTree + ocrBlocks.filter { o -> fromTree.none { overlapsMostly(it.bounds, o.bounds) } }
         blocks = merged
         render()
         sampleColors(root, merged)
@@ -263,13 +301,21 @@ class LiveTranslator(
         val myOrder = ++order
         val myKey = node.hashCode()
         val text = node.text?.toString()?.trim()
-        val hasText = !text.isNullOrEmpty() && text.any { it.isLetter() }
+        // An image's text is its description (alt text), not something drawn on screen.
+        val isImage = node.className?.contains("Image") == true
+        if ((isImage || node.className?.contains("WebView") == true) && !r.isEmpty) readableAreas.add(Rect(r))
+        if (isImage && !text.isNullOrBlank() && !r.isEmpty) imageLabels.add(Rect(r) to text.toString())
+        val hasText = !isImage && !text.isNullOrEmpty() && text.any { it.isLetter() }
 
-        // Edges of scrolling lists, where text gets cut off while scrolling.
-        val childViewport = if (node.isScrollable) Rect(r).apply { if (!intersect(viewport)) setEmpty() } else viewport
+        // Edges of scrolling lists, where text gets cut off while scrolling. Short scrolling strips
+        // (carousels, rows that scroll sideways) don't cut text vertically, so they don't count.
+        val tallScroller = node.isScrollable && r.height() > screen.height() / 4
+        val childViewport = if (tallScroller) Rect(r).apply { if (!intersect(viewport)) setEmpty() } else viewport
         // Everything inside a node is clipped to it. Regular views already report clipped bounds,
         // but web content (e.g. Firefox-based browsers) reports text hidden under the toolbar too.
-        val childClip = Rect(r).apply { if (!intersect(clip)) setEmpty() }
+        // Some browsers report containers at stale positions; one that doesn't even overlap its
+        // content can't be trusted for clipping, so it's skipped.
+        val childClip = if (Rect.intersects(r, clip)) Rect(r).apply { intersect(clip) } else Rect(clip)
         var childText = false
         for (i in 0 until node.childCount) {
             node.getChild(i)?.let {
@@ -286,11 +332,18 @@ class LiveTranslator(
             // can be anchored to the visible edge of the original. Text touching the edge of its
             // container counts as cut too (Android trims those bounds before reporting them).
             val visible = Rect(r)
-            val shown = visible.intersect(clip) && visible.intersect(viewport) && visible.intersect(screen)
+            var shown = visible.intersect(clip) && visible.intersect(viewport) && visible.intersect(screen)
+            if (!shown) {
+                // The containers' reported position doesn't match the text's: trust the text.
+                visible.set(r)
+                shown = visible.intersect(viewport) && visible.intersect(screen)
+            }
+            // Only the screen and real scrolling areas cut text off; containers just trim extra margins.
             val edge = 2
+            val onScreen = Rect(r).apply { intersect(viewport); intersect(screen) }
             val cut = when {
-                visible.bottom < r.bottom - edge || visible.bottom >= viewport.bottom - edge -> 1
-                visible.top > r.top + edge || visible.top <= viewport.top + edge -> -1
+                onScreen.bottom < r.bottom - edge || onScreen.bottom >= viewport.bottom - edge -> 1
+                onScreen.top > r.top + edge || onScreen.top <= viewport.top + edge -> -1
                 else -> 0
             }
             if (!container && shown && visible.width() > 8 && visible.height() > 8) {
@@ -399,19 +452,93 @@ class LiveTranslator(
             val m = colors.get(measureKey(b))
             // Briefly hold back until the real colors are known so boxes don't flash white.
             if (m == null && waitForColors) return@mapNotNull null
-            val ink = m?.takeIf { it[2] > 0 }?.let {
-                val sameBounds = it[10] == b.bounds.width() && it[11] == b.bounds.height()
+            val v = m?.v
+            // Rows hidden behind a pinned header or footer are left alone.
+            var bounds = b.bounds
+            var cut = b.cut
+            if (v != null && (v[12] > 0 || v[13] < b.bounds.height())) {
+                if (v[13] - v[12] < 8) return@mapNotNull null
+                bounds = Rect(b.bounds.left, b.bounds.top + v[12], b.bounds.right, b.bounds.top + v[13])
+                if (v[12] > 0) cut = -1 else if (v[13] < b.bounds.height()) cut = 1
+            }
+            val ink = v?.takeIf { it[2] > 0 }?.let {
+                val sameBounds = bounds == b.bounds
                 TranslationOverlayView.Ink(
                     textSize = it[2].toFloat(),
                     linePitch = it[9].toFloat(),
                     centered = it[8] == 1,
                     area = if (sameBounds) Rect(it[4], it[5], it[6], it[7]) else null,
+                    bold = it[15] == 1,
                 )
             }
+            val patchRect = m?.patchRect?.let { Rect(it).apply { offset(b.bounds.left, b.bounds.top) } }
             TranslationOverlayView.Item(
-                b.bounds, translated, b.text, m?.get(0), m?.get(1), b.maxRight, b.cut, b.covers, ink,
+                bounds, translated, b.text, v?.get(0), v?.get(1),
+                if (v != null) minOf(b.maxRight, v[14]) else b.maxRight, cut, b.covers, ink,
+                m?.patch, patchRect,
             )
         })
+    }
+
+    /** Reads the text on the screenshot and adds the blocks the tree didn't have; measures them too. */
+    private fun readScreen(bmp: Bitmap, px: IntArray, windowOrigin: Rect) {
+        scope.launch {
+            val result = runCatching {
+                // Starts ML Kit native code: not at the same time as a translator (see nativeInit).
+                nativeInit.withLock { ocr.process(InputImage.fromBitmap(bmp, 0)).await() }
+            }.getOrNull()
+            bmp.recycle()
+            if (result == null || stopped || scrolling) return@launch
+            val screen = wm.currentWindowMetrics.bounds
+            val out = ArrayList<TextBlock>()
+            val allLineHeights = result.textBlocks.flatMap { it.lines }.mapNotNull { it.boundingBox?.height() }.sorted()
+            val usual = if (allLineHeights.isEmpty()) 0 else allLineHeights[allLineHeights.size / 2]
+            for (tb in result.textBlocks) {
+                val lines = tb.lines.filter { it.confidence >= OCR_CONFIDENCE && it.text.count { c -> c.isLetter() } >= 2 }
+                if (lines.isEmpty()) continue
+                val box = Rect()
+                lines.forEach { l -> l.boundingBox?.let { box.union(it) } }
+                if (box.isEmpty || box.height() < 10) continue
+                // OCR boxes hug the letters; give them a little room so the background can be sampled.
+                val lineHeight = box.height() / lines.size
+                box.inset(-maxOf(3, lineHeight / 5), -maxOf(3, lineHeight / 6))
+                box.offset(windowOrigin.left, windowOrigin.top)
+                box.intersect(screen)
+                val cut = when {
+                    box.top <= screen.top + 2 -> -1
+                    box.bottom >= screen.bottom - 2 -> 1
+                    else -> 0
+                }
+                val text = lines.joinToString(" ") { it.text }
+                // Only text inside a web page or an image: never the app's own buttons or address bar.
+                val inside = readableAreas.any { area ->
+                    val i = Rect()
+                    i.setIntersect(area, box) && i.width().toLong() * i.height() >= box.width().toLong() * box.height() * 8 / 10
+                }
+                if (!inside) continue
+                // A logo: the image's description is the same words (e.g. "Sammy Fans").
+                val letters = text.filter { it.isLetterOrDigit() }.lowercase()
+                val logo = imageLabels.any { (area, label) ->
+                    val l = label.filter { it.isLetterOrDigit() }.lowercase()
+                    Rect.intersects(area, box) && letters.length >= 2 && (l.contains(letters) || letters.contains(l))
+                }
+                // Logos and brand marks: a short phrase in capitals, much bigger than the page's text.
+                val words = text.split(' ').filter { it.isNotBlank() }
+                val caps = text.filter { it.isLetter() }
+                val bigCaps = words.size <= 3 && caps.isNotEmpty() && caps.all { it.isUpperCase() } && lineHeight > usual * 1.6f
+                if (logo || bigCaps) continue
+                out.add(TextBlock(text, box, maxRight = box.right, cut = cut, order = Int.MAX_VALUE - 1, parent = -1))
+            }
+            ocrBlocks = out
+            val w = bmp.width
+            val h = bmp.height
+            for (b in out) {
+                if (colors.get(measureKey(b)) != null) continue
+                val r = Rect(b.bounds).apply { offset(-windowOrigin.left, -windowOrigin.top) }
+                sample(px, w, h, r, b.text, b.cut != 0)?.let { colors.put(measureKey(b), it) }
+            }
+            scheduleRefresh()
+        }
     }
 
     /** Text partly off screen looks different from the same text fully in view, so measure each separately. */
@@ -429,7 +556,7 @@ class LiveTranslator(
     private fun sampleColors(root: AccessibilityNodeInfo, found: List<TextBlock>) {
         if (!canSampleColors || shotFailures >= 3 || shotPending) return
         val missing = found.filter { colors.get(measureKey(it)) == null }
-        if (missing.isEmpty()) return
+        if (missing.isEmpty() && ocrDone) return
         val now = SystemClock.uptimeMillis()
         if (now - lastShotAt < SCREENSHOT_INTERVAL_MS) {
             handler.postDelayed({ if (!stopped && !scrolling) scheduleRefresh() }, SCREENSHOT_INTERVAL_MS - (now - lastShotAt))
@@ -453,11 +580,17 @@ class LiveTranslator(
                     val h = bmp.height
                     val px = IntArray(w * h)
                     bmp.getPixels(px, 0, w, 0, 0, w, h)
-                    bmp.recycle()
+                    if (!ocrDone) {
+                        ocrDone = true
+                        readScreen(bmp, px, windowOrigin)
+                    } else {
+                        bmp.recycle()
+                    }
                     for (b in missing) {
                         val r = Rect(b.bounds).apply { offset(-windowOrigin.left, -windowOrigin.top) }
                         val covers = b.covers.map { Rect(it).apply { offset(-windowOrigin.left, -windowOrigin.top) } }
-                        sample(px, w, h, r, b.text, b.cut != 0, covers)?.let { colors.put(measureKey(b), it) }
+                        val growTo = b.maxRight - windowOrigin.left
+                        sample(px, w, h, r, b.text, b.cut != 0, covers, growTo)?.let { colors.put(measureKey(b), it) }
                     }
                     shotFailures = 0
                     render()
@@ -490,7 +623,8 @@ class LiveTranslator(
         text: String,
         cut: Boolean,
         covers: List<Rect> = emptyList(),
-    ): IntArray? {
+        growTo: Int = bounds.right,
+    ): Measure? {
         val r = Rect(bounds)
         if (!r.intersect(0, 0, w, h) || r.width() < 3 || r.height() < 3) return null
         fun at(x: Int, y: Int) = px[y * w + x]
@@ -514,6 +648,9 @@ class LiveTranslator(
         }
         val acc = counts.values.maxByOrNull { it[0] }!!
         val bg = Color.rgb(acc[1] / acc[0], acc[2] / acc[0], acc[3] / acc[0])
+        // Flat background (one colour all around): a plain fill is pixel-identical. Otherwise
+        // (photos, gradients) the real background is rebuilt behind the letters.
+        val flat = acc[0] >= counts.values.sumOf { it[0] } * 0.85f
 
         // Letters: rows and columns that contain pixels clearly different from the background.
         var fg = 0
@@ -608,10 +745,141 @@ class LiveTranslator(
                 inkRight - bounds.left + 1, r.top - bounds.top + bands.last()[1],
             )
         }
-        return intArrayOf(
-            bg, fg or 0xFF000000.toInt(), size, bands.size,
-            area[0], area[1], area[2], area[3], centered, pitch, bounds.width(), bounds.height(),
+        val textColor = fg or 0xFF000000.toInt()
+
+        // Bold: thick strokes fill much more of each line than regular ones.
+        var bold = 0
+        if (bands.isNotEmpty() && inkRight > inkLeft) {
+            val inked = rowCount.sum().toFloat()
+            val lineArea = bands.sumOf { it[1] - it[0] } * (inkRight - inkLeft + 1) / 2f
+            if (lineArea > 0 && inked / lineArea > BOLD_FILL) bold = 1
+        }
+
+        // Rows hidden behind something pinned on top (a sticky header or footer bar) show that
+        // thing at both side edges instead of the background: find them from the top and bottom.
+        var visibleTop = 0
+        var visibleBottom = bounds.height()
+        // A pinned bar spans the whole width, so it also covers the background just outside the
+        // text on both sides; ordinary text has plain background there.
+        val outLeft = r.left - 4
+        val outRight = r.right + 3
+        if (flat && outLeft >= 0 && outRight < w) {
+            fun hidden(yy: Int): Boolean {
+                val a1 = at(outLeft, yy)
+                val a2 = at(outRight, yy)
+                return dist(a1, bg) > 60 && dist(a2, bg) > 60 && dist(a1, a2) < 60
+            }
+            var t = r.top
+            while (t < r.bottom && hidden(t)) t++
+            if (t - r.top >= 6) visibleTop = t - bounds.top
+            var bt = r.bottom - 1
+            while (bt >= r.top && hidden(bt)) bt--
+            if (r.bottom - 1 - bt >= 6) visibleBottom = bt + 1 - bounds.top
+        }
+
+        // How far a longer translation may extend to the right: only over the same flat background.
+        var growLimit = bounds.right
+        if (flat) {
+            val rows = intArrayOf(r.top + r.height() / 4, r.top + r.height() / 2, r.top + r.height() * 3 / 4)
+            var x = r.right
+            val end = minOf(growTo, w)
+            while (x < end && rows.all { dist(at(x, it), bg) <= 50 }) x += 2
+            growLimit = x
+        }
+
+        // Non-flat background: keep the real pixels and paint the letters out.
+        var patch: Bitmap? = null
+        var patchRect: Rect? = null
+        if (!flat) {
+            val pr = Rect(r).apply { inset(-3, -3); intersect(0, 0, w, h) }
+            patch = inpaint(px, w, pr, textColor, bg)
+            patchRect = Rect(pr).apply { offset(-bounds.left, -bounds.top) }
+        }
+
+        return Measure(
+            intArrayOf(
+                bg, textColor, size, bands.size,
+                area[0], area[1], area[2], area[3], centered, pitch, bounds.width(), bounds.height(),
+                visibleTop, visibleBottom, growLimit, bold,
+            ),
+            patch, patchRect,
         )
+    }
+
+    /**
+     * Rebuilds the background behind text: pixels close to the text colour (grown by 2 px to catch
+     * anti-aliasing) are replaced by blending the nearest background pixels to the left/right and
+     * above/below, so photos and gradients continue smoothly where the letters were.
+     */
+    private fun inpaint(px: IntArray, w: Int, rect: Rect, fg: Int, bg: Int): Bitmap? {
+        val pw = rect.width()
+        val ph = rect.height()
+        if (pw <= 0 || ph <= 0 || pw.toLong() * ph > 2_500_000) return null
+        fun dist(a: Int, b: Int) =
+            abs(Color.red(a) - Color.red(b)) + abs(Color.green(a) - Color.green(b)) + abs(Color.blue(a) - Color.blue(b))
+        val src = IntArray(pw * ph)
+        for (yy in 0 until ph) System.arraycopy(px, (rect.top + yy) * w + rect.left, src, yy * pw, pw)
+
+        val near = maxOf(45, dist(fg, bg) / 2)
+        var mask = BooleanArray(pw * ph) { dist(src[it], fg) < near }
+        // Grow the mask by 2 px horizontally, then vertically.
+        val grown = BooleanArray(pw * ph)
+        for (yy in 0 until ph) for (xx in 0 until pw) {
+            if (!mask[yy * pw + xx]) continue
+            for (d in -2..2) { val x2 = xx + d; if (x2 in 0 until pw) grown[yy * pw + x2] = true }
+        }
+        mask = BooleanArray(pw * ph)
+        for (yy in 0 until ph) for (xx in 0 until pw) {
+            if (!grown[yy * pw + xx]) continue
+            for (d in -2..2) { val y2 = yy + d; if (y2 in 0 until ph) mask[y2 * pw + xx] = true }
+        }
+
+        fun lerp(a: Int, b: Int, t: Float): Int = Color.rgb(
+            (Color.red(a) + (Color.red(b) - Color.red(a)) * t).toInt(),
+            (Color.green(a) + (Color.green(b) - Color.green(a)) * t).toInt(),
+            (Color.blue(a) + (Color.blue(b) - Color.blue(a)) * t).toInt(),
+        )
+        val horizontal = arrayOfNulls<Int>(pw * ph)
+        for (yy in 0 until ph) {
+            var xx = 0
+            while (xx < pw) {
+                if (!mask[yy * pw + xx]) { xx++; continue }
+                val s0 = xx
+                while (xx < pw && mask[yy * pw + xx]) xx++
+                val left = if (s0 > 0) src[yy * pw + s0 - 1] else null
+                val right = if (xx < pw) src[yy * pw + xx] else null
+                for (k in s0 until xx) {
+                    horizontal[yy * pw + k] = when {
+                        left != null && right != null -> lerp(left, right, (k - s0 + 1f) / (xx - s0 + 1f))
+                        else -> left ?: right
+                    }
+                }
+            }
+        }
+        val out = src.copyOf()
+        for (xx in 0 until pw) {
+            var yy = 0
+            while (yy < ph) {
+                if (!mask[yy * pw + xx]) { yy++; continue }
+                val s0 = yy
+                while (yy < ph && mask[yy * pw + xx]) yy++
+                val top = if (s0 > 0) src[(s0 - 1) * pw + xx] else null
+                val bottom = if (yy < ph) src[yy * pw + xx] else null
+                for (k in s0 until yy) {
+                    val i = k * pw + xx
+                    val v = when {
+                        top != null && bottom != null -> lerp(top, bottom, (k - s0 + 1f) / (yy - s0 + 1f))
+                        else -> top ?: bottom
+                    }
+                    val hz = horizontal[i]
+                    out[i] = when {
+                        v != null && hz != null -> lerp(v, hz, 0.5f)
+                        else -> v ?: hz ?: bg
+                    } or 0xFF000000.toInt()
+                }
+            }
+        }
+        return Bitmap.createBitmap(out, pw, ph, Bitmap.Config.ARGB_8888)
     }
 
     private val measurePaint = TextPaint(Paint.ANTI_ALIAS_FLAG)
@@ -653,7 +921,9 @@ class LiveTranslator(
         for (chunk in texts.chunked(6)) {
             chunk.map { text ->
                 scope.async {
-                    translate(text, pageLang)?.let {
+                    translate(text, pageLang)?.let { tr ->
+                        // A translation with no letters (e.g. an icon read as a letter) isn't trusted.
+                        val it = if (text.any { c -> c.isLetter() } && tr.none { c -> c.isLetter() }) "" else tr
                         cache.put(text, it)
                         renderSoon()
                     }
