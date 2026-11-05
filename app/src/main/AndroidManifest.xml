@@ -57,6 +57,11 @@
             android:taskAffinity=".overlay"
             android:theme="@style/Theme.CSearch.Sheet" />
 
+        <activity
+            android:name=".translate.OfflineLanguagesActivity"
+            android:exported="false"
+            android:label="@string/offline_title" />
+
         <!-- Screenshot capture without MediaProjection prompts -->
         <service
             android:name=".CaptureService"

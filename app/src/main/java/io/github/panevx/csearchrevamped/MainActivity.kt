@@ -63,6 +63,9 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(this, MusicActivity::class.java))
         }
 
+        findViewById<android.view.View>(R.id.btn_offline).setOnClickListener {
+            startActivity(Intent(this, io.github.panevx.csearchrevamped.translate.OfflineLanguagesActivity::class.java))
+        }
         findViewById<CompoundButton>(R.id.autoSearch).apply {
             isChecked = Prefs.autoSearch(this@MainActivity)
             setOnCheckedChangeListener { _, on -> Prefs.setAutoSearch(this@MainActivity, on) }
