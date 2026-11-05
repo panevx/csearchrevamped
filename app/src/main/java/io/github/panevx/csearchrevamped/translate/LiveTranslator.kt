@@ -50,7 +50,23 @@ class LiveTranslator(
     private val service: AccessibilityService,
     private val onClosed: () -> Unit,
 ) {
-    private data class TextBlock(val text: String, val bounds: Rect, var maxRight: Int = 0)
+    /**
+     * [cut] is 1 when the text continues below the visible area, -1 when it starts above it.
+     * [order] is the position in drawing order (later is on top); [parent] identifies the parent node.
+     */
+    private data class TextBlock(
+        val text: String,
+        val bounds: Rect,
+        var maxRight: Int = 0,
+        val cut: Int = 0,
+        val order: Int = 0,
+        val lastOrder: Int = order,
+        val parent: Int = 0,
+        var covers: List<Rect> = emptyList(),
+    )
+
+    /** Something drawn on screen, in drawing order: used to keep translations from painting over it. */
+    private class Shape(val order: Int, val bounds: Rect)
 
     private companion object {
         const val MAX_BLOCKS = 250
@@ -170,9 +186,13 @@ class LiveTranslator(
         val screen = wm.currentWindowMetrics.bounds
         val found = ArrayList<TextBlock>()
         val obstacles = ArrayList<Rect>()
-        collect(root, screen, screen, found, obstacles, 0)
-        limitGrowth(found, obstacles, screen)
-        blocks = found
+        val shapes = ArrayList<Shape>()
+        order = 0
+        collect(root, screen, screen, screen, found, obstacles, shapes, 0, 0)
+        val merged = mergeFragments(found)
+        limitGrowth(merged, obstacles, screen)
+        findCovers(merged, shapes)
+        blocks = merged
         render()
         sampleColors(root, found)
 
@@ -185,35 +205,131 @@ class LiveTranslator(
         }
     }
 
+    private var order = 0
+
+    /**
+     * Collects the most specific text on screen. Children are visited first: when a node's
+     * descendants carry text (a web page whose root holds the page title, a paragraph split into
+     * links and spans), only the descendants are translated, so text is never drawn twice.
+     * Returns whether this subtree contains any text.
+     */
     private fun collect(
         node: AccessibilityNodeInfo,
         screen: Rect,
         viewport: Rect,
+        clip: Rect,
         out: MutableList<TextBlock>,
         obstacles: MutableList<Rect>,
+        shapes: MutableList<Shape>,
+        parentKey: Int,
         depth: Int,
-    ) {
-        if (depth > 80 || out.size >= MAX_BLOCKS || !node.isVisibleToUser) return
-        val text = node.text?.toString()?.trim()
+    ): Boolean {
+        if (depth > 80 || out.size >= MAX_BLOCKS || !node.isVisibleToUser) return false
         val r = Rect()
         node.getBoundsInScreen(r)
-        if (!text.isNullOrEmpty() && !node.isEditable && text.any { it.isLetter() }) {
-            // Skip lines cut off at the edge of the screen or of a scrolling list (Android reports
-            // their bounds already trimmed); they get translated once fully in view. Very tall
-            // text, like a long paragraph, is still translated while partly visible.
+        val myOrder = ++order
+        val myKey = node.hashCode()
+        val text = node.text?.toString()?.trim()
+        val hasText = !text.isNullOrEmpty() && text.any { it.isLetter() }
+
+        // Edges of scrolling lists, where text gets cut off while scrolling.
+        val childViewport = if (node.isScrollable) Rect(r).apply { if (!intersect(viewport)) setEmpty() } else viewport
+        // Everything inside a node is clipped to it. Regular views already report clipped bounds,
+        // but web content (e.g. Firefox-based browsers) reports text hidden under the toolbar too.
+        val childClip = Rect(r).apply { if (!intersect(clip)) setEmpty() }
+        var childText = false
+        for (i in 0 until node.childCount) {
+            node.getChild(i)?.let {
+                if (collect(it, screen, childViewport, childClip, out, obstacles, shapes, myKey, depth + 1)) childText = true
+            }
+        }
+        if (childText) return true
+
+        if (hasText && !node.isEditable) {
+            // A page-sized node with text is a container (e.g. a browser reporting the page title),
+            // not text drawn on screen.
+            val container = r.width().toLong() * r.height() > screen.width().toLong() * screen.height() * 2 / 5
+            // Trim to what's actually visible and remember which side is cut, so the translation
+            // can be anchored to the visible edge of the original. Text touching the edge of its
+            // container counts as cut too (Android trims those bounds before reporting them).
+            val visible = Rect(r)
+            val shown = visible.intersect(clip) && visible.intersect(viewport) && visible.intersect(screen)
             val edge = 2
-            val touchesEdge = r.top <= viewport.top + edge && viewport.top > screen.top ||
-                r.bottom >= viewport.bottom - edge || r.top <= screen.top
-            val cutOff = touchesEdge && r.height() < screen.height() / 2
-            if (r.width() > 8 && r.height() > 8 && r.intersect(screen) && !cutOff) out.add(TextBlock(text, r))
-        } else if (node.childCount == 0 && !r.isEmpty) {
+            val cut = when {
+                visible.bottom < r.bottom - edge || visible.bottom >= viewport.bottom - edge -> 1
+                visible.top > r.top + edge || visible.top <= viewport.top + edge -> -1
+                else -> 0
+            }
+            if (!container && shown && visible.width() > 8 && visible.height() > 8) {
+                out.add(TextBlock(text!!, visible, cut = cut, order = myOrder, parent = parentKey))
+                shapes.add(Shape(myOrder, visible))
+            }
+            return true
+        }
+        if (node.childCount == 0 && !r.isEmpty) {
             // Icons, switches, images and other text: translations must not grow over them.
             obstacles.add(r)
         }
-        val childViewport = if (node.isScrollable) Rect(r).apply { intersect(viewport) } else viewport
-        for (i in 0 until node.childCount) {
-            node.getChild(i)?.let { collect(it, screen, childViewport, out, obstacles, depth + 1) }
+        // Leaves, tappable things and anything smaller than a page (cards, banners, pop-ups,
+        // toolbars) are solid on screen. Page-sized layout containers are usually transparent.
+        val pageSized = r.width().toLong() * r.height() > screen.width().toLong() * screen.height() * 2 / 5
+        if ((node.childCount == 0 || node.isClickable || !pageSized) && !r.isEmpty) shapes.add(Shape(myOrder, r))
+        return hasText
+    }
+
+    /**
+     * Web pages often split one paragraph into pieces (text, a link, more text) whose boxes each
+     * span the paragraph. Pieces that follow each other and overlap are joined back into one
+     * block, so the paragraph is translated as a whole and never drawn on top of itself.
+     */
+    private fun mergeFragments(found: List<TextBlock>): List<TextBlock> {
+        val out = ArrayList<TextBlock>()
+        for (b in found) {
+            val last = out.lastOrNull()
+            if (last != null && last.parent == b.parent && overlapsMostly(last.bounds, b.bounds)) {
+                val joiner = if (last.text.last().isWhitespace() || b.text.first().let { !it.isLetterOrDigit() }) "" else " "
+                out[out.size - 1] = TextBlock(
+                    last.text + joiner + b.text, Rect(last.bounds).apply { union(b.bounds) },
+                    cut = if (last.cut != 0) last.cut else b.cut,
+                    order = last.order, lastOrder = b.lastOrder, parent = last.parent,
+                )
+            } else {
+                out.add(b)
+            }
         }
+        return out
+    }
+
+    /** Things drawn later that overlap a block are on top of it; its translation is cut out around them. */
+    private fun findCovers(found: List<TextBlock>, shapes: List<Shape>) {
+        // Browsers often don't report the card or banner itself, only what's inside it (an image,
+        // a title, a close button), so pieces close together are treated as one solid area.
+        val gap = (48 * service.resources.displayMetrics.density).toInt()
+        for (b in found) {
+            val covers = shapes.filter { it.order > b.lastOrder && Rect.intersects(it.bounds, b.bounds) }
+                .map { Rect(it.bounds) }.toMutableList()
+            var merged = true
+            while (merged) {
+                merged = false
+                loop@ for (i in covers.indices) for (j in i + 1 until covers.size) {
+                    val near = Rect(covers[i]).apply { inset(-gap, -gap) }
+                    if (Rect.intersects(near, covers[j])) {
+                        covers[i].union(covers[j])
+                        covers.removeAt(j)
+                        merged = true
+                        break@loop
+                    }
+                }
+            }
+            b.covers = covers
+        }
+    }
+
+    private fun overlapsMostly(a: Rect, b: Rect): Boolean {
+        val i = Rect()
+        if (!i.setIntersect(a, b)) return false
+        val smaller = minOf(a.width().toLong() * a.height(), b.width().toLong() * b.height())
+        return i.width().toLong() * i.height() * 4 >= smaller
     }
 
     /** Lets each block grow right only up to the next thing on the same line. */
@@ -238,7 +354,7 @@ class LiveTranslator(
             val c = colors.get(b.text)
             // Briefly hold back until the real colors are known so boxes don't flash white.
             if (c == null && waitForColors) return@mapNotNull null
-            TranslationOverlayView.Item(b.bounds, translated, b.text, c?.get(0), c?.get(1), b.maxRight)
+            TranslationOverlayView.Item(b.bounds, translated, b.text, c?.get(0), c?.get(1), b.maxRight, b.cut, b.covers)
         })
     }
 

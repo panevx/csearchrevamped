@@ -31,9 +31,19 @@ class TranslationOverlayView(context: Context) : View(context) {
         val foreground: Int?,
         /** How far right the box may grow without covering other text, icons or controls. */
         val maxRight: Int,
+        /** 1 when the original continues below the visible area, -1 when it starts above it. */
+        val cut: Int = 0,
+        /** Things on top of the original (pop-ups, banners, buttons): never paint over them. */
+        val covers: List<Rect> = emptyList(),
     )
 
-    private class Placed(val rect: RectF, val layout: StaticLayout, val background: Int)
+    private class Placed(
+        val rect: RectF,
+        val layout: StaticLayout,
+        val background: Int,
+        val cut: Int = 0,
+        var covers: List<Rect> = emptyList(),
+    )
 
     private val density = resources.displayMetrics.density
     private fun dp(v: Float) = v * density
@@ -51,11 +61,17 @@ class TranslationOverlayView(context: Context) : View(context) {
     private val cache = HashMap<String, Placed>()
 
     fun setItems(items: List<Item>) {
+        // Text cut off at the screen edge can't reveal its font size, so it uses the page's usual size.
+        val sizes = items.filter { it.cut == 0 }
+            .map { originalSize(it.original, max(1, it.bounds.width()), max(1, it.bounds.height())) }
+            .sorted()
+        val typical = if (sizes.isEmpty()) dp(16f) else sizes[sizes.size / 2]
         val used = HashMap<String, Placed>()
         placed = items.map { item ->
-            val key = "${item.bounds.flattenToString()}|${item.text}|${item.background}|${item.foreground}|${item.maxRight}"
-            val p = cache[key]?.let { Placed(RectF(it.rect), it.layout, it.background) } ?: place(item)
-            used[key] = Placed(RectF(p.rect), p.layout, p.background)
+            val key = "${item.bounds.flattenToString()}|${item.text}|${item.background}|${item.foreground}|${item.maxRight}|${item.cut}|$typical"
+            val p = cache[key]?.let { Placed(RectF(it.rect), it.layout, it.background, it.cut) } ?: place(item, typical)
+            used[key] = Placed(RectF(p.rect), p.layout, p.background, p.cut)
+            p.covers = item.covers
             p
         }
         cache.clear()
@@ -90,21 +106,34 @@ class TranslationOverlayView(context: Context) : View(context) {
             .build()
     }
 
+    private val sizeCache = HashMap<String, Float>()
+
     /** Largest font size at which the original text fits its box, which approximates the app's font size. */
     private fun originalSize(original: String, w: Int, h: Int): Float {
+        val key = "$w:$h:$original"
+        sizeCache[key]?.let { return it }
+        if (sizeCache.size > 2000) sizeCache.clear()
         var lo = minSize
         var hi = max(minSize, min(h.toFloat(), dp(40f)))
         repeat(7) {
             val mid = (lo + hi) / 2
             if (build(original, mid, w, 0).height <= h) lo = mid else hi = mid
         }
+        sizeCache[key] = lo
         return lo
     }
 
-    private fun place(item: Item): Placed {
+    private fun place(item: Item, typical: Float): Placed {
         val w0 = max(1, item.bounds.width())
         val h = max(1, item.bounds.height())
         val color = item.foreground ?: defaultForeground
+
+        if (item.cut != 0) {
+            // Only part of the original is visible: lay the translation out at the usual size and
+            // anchor it to the visible edge; the rest is clipped like the original.
+            val rect = RectF(item.bounds).apply { inset(-pad * 2, 0f) }
+            return Placed(rect, build(item.text, typical, w0, color), item.background ?: defaultBackground, item.cut)
+        }
 
         // Same spot and height as the original. A longer translation may first use free space to
         // the right on the same line, then shrinks to fit.
@@ -133,11 +162,17 @@ class TranslationOverlayView(context: Context) : View(context) {
         canvas.translate(-origin[0].toFloat(), -origin[1].toFloat())
         val radius = dp(2f)
         for (p in placed) {
+            canvas.save()
+            for (c in p.covers) canvas.clipOutRect(c)
             boxPaint.color = p.background
             canvas.drawRoundRect(p.rect, radius, radius, boxPaint)
-            canvas.save()
             canvas.clipRect(p.rect)
-            canvas.translate(p.rect.left + pad * 2, p.rect.top + (p.rect.height() - p.layout.height) / 2f)
+            val top = when (p.cut) {
+                1 -> p.rect.top
+                -1 -> p.rect.bottom - p.layout.height
+                else -> p.rect.top + (p.rect.height() - p.layout.height) / 2f
+            }
+            canvas.translate(p.rect.left + pad * 2, top)
             p.layout.draw(canvas)
             canvas.restore()
         }
