@@ -1,0 +1,49 @@
+# CSearch Revamped
+
+Circle anything on your Android screen to search it with Google Lens image search, translate it, or copy its text. You don't need the Google app. CSearch Revamped also identifies songs playing around you.
+
+## Features
+
+- **Circle to search.** Freeze the screen, then circle, scribble or tap anything. The selection is sent to Google Lens on the web, and the results open in a sheet inside the app.
+- **Translate.** On-device OCR reads the selected text (Latin, Chinese, Japanese, Korean and Devanagari scripts), then Google Translate opens with your chosen target language.
+- **Text.** Copy, edit, search or translate the text in the selection.
+- **Share.** Send the cropped selection to any app.
+- **Song search.** Listen for 10 seconds and identify the song with [AudD](https://audd.io), with links to YouTube and Spotify.
+
+## Ways to start a search
+
+| Trigger | Setup |
+| --- | --- |
+| Long-press home / gesture bar | Settings → Apps → Default apps → Digital assistant app → **CSearch Revamped** (turn on "Use screenshot") |
+| Quick Settings tile | Add the **Screen search** and **Song search** tiles |
+| Accessibility button / shortcut | Enable the CSearch Revamped accessibility service |
+
+The accessibility service is what takes screenshots without asking for screen-recording permission on every search. It only captures when you trigger a search, and it doesn't read window content.
+
+> **Android 13+ sideloading:** if the accessibility toggle is greyed out ("restricted setting"), open *App info → ⋮ → Allow restricted settings*, then try again.
+
+## Install
+
+Download `csearchrevamped.apk` from the [latest release](../../releases/latest) and install it. Requires Android 11 or newer and Google Play services (for the OCR models).
+
+## Song search token
+
+AudD allows a few anonymous recognitions per day. For more, create a free token at [dashboard.audd.io](https://dashboard.audd.io) and paste it into the app's settings.
+
+## Build
+
+```sh
+gradle assembleRelease   # Gradle 8.10+, JDK 17, Android SDK 35
+```
+
+Or open the project in Android Studio. To build releases automatically, copy `docs/github-actions-build.yml` to `.github/workflows/build.yml`. It signs with the `KEYSTORE_B64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS` and `KEY_PASSWORD` secrets when they're set, and publishes a release for every `v*` tag.
+
+## Privacy
+
+Screenshots stay in memory and are only uploaded when you press **Search** (sent to Google Lens) or **Translate** (only the recognised text is sent to Google Translate). Song search uploads a 10 second recording to AudD.
+
+Not affiliated with Google.
+
+## License
+
+MIT

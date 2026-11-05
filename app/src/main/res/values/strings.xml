@@ -1,0 +1,60 @@
+<resources>
+    <string name="app_name">CSearch Revamped</string>
+    <string name="a11y_label">CSearch Revamped screen search</string>
+    <string name="a11y_description">Lets CSearch Revamped take a screenshot when you tap the accessibility button, the Quick Settings tile or the assistant gesture, so you can circle something and search it. Nothing is captured unless you trigger it.</string>
+    <string name="tile_capture">Screen search</string>
+    <string name="tile_music">Song search</string>
+
+    <string name="hint_draw">Circle or tap anything to search</string>
+    <string name="hint_selected">Search, translate or copy the selection</string>
+    <string name="action_search">Search</string>
+    <string name="action_translate">Translate</string>
+    <string name="action_text">Text</string>
+    <string name="action_share">Share</string>
+    <string name="close">Close</string>
+    <string name="open_in_browser">Open in browser</string>
+    <string name="song_search">Song search</string>
+    <string name="title_search">Image search</string>
+    <string name="title_translate">Translate</string>
+    <string name="title_web">Search</string>
+    <string name="text_found">Text</string>
+    <string name="no_text">No text found in the selection</string>
+    <string name="no_text_lens">No text found, opening image search instead</string>
+    <string name="copy">Copy</string>
+    <string name="copied">Copied</string>
+    <string name="capture_failed">Could not capture the screen (%1$d)</string>
+    <string name="enable_service_first">Enable the CSearch Revamped accessibility service first</string>
+    <string name="no_screenshot">Turn on "Use screenshot" in the assistant settings, or enable the accessibility service</string>
+
+    <string name="listening">Listening…</string>
+    <string name="listening_sub">Play or hum near the mic · %1$ds</string>
+    <string name="identifying">Identifying…</string>
+    <string name="not_found">No match found</string>
+    <string name="not_found_sub">Try again closer to the speaker</string>
+    <string name="mic_denied">Microphone permission is needed for song search</string>
+    <string name="mic_error">Could not start the microphone</string>
+    <string name="audd_token_hint">The free anonymous limit was reached. Add a free AudD API token in CSearch Revamped settings.</string>
+    <string name="listen_again">Listen again</string>
+    <string name="open_song">Open</string>
+    <string name="youtube">YouTube</string>
+    <string name="spotify">Spotify</string>
+
+    <string name="setup_title">Set up screen search</string>
+    <string name="step_service_title">1 · Screen capture</string>
+    <string name="step_service_body">Turn on the CSearch Revamped accessibility service. It only takes a screenshot when you trigger a search.\n\nIf Android says the setting is restricted: App info → ⋮ → Allow restricted settings, then try again.</string>
+    <string name="step_service_button">Open accessibility settings</string>
+    <string name="step_assist_title">2 · Long-press home (optional)</string>
+    <string name="step_assist_body">Set CSearch Revamped as your digital assistant app, then long-press home or the gesture bar to start a search.</string>
+    <string name="step_assist_button">Choose assistant app</string>
+    <string name="step_tile_title">3 · Quick Settings tiles (optional)</string>
+    <string name="step_tile_body">Add the "Screen search" and "Song search" tiles to your Quick Settings panel.</string>
+    <string name="step_tile_button">Add screen search tile</string>
+    <string name="step_tile_music_button">Add song search tile</string>
+    <string name="status_on">✓ Enabled</string>
+    <string name="status_off">Not enabled</string>
+    <string name="try_now">Try screen search</string>
+    <string name="settings_title">Settings</string>
+    <string name="translate_to">Translate to (language code, e.g. en, bg, de)</string>
+    <string name="audd_token">AudD API token for song search (optional)</string>
+    <string name="audd_token_help">Song search uses the AudD recognition API. It works a few times a day without a token; get a free token at dashboard.audd.io for more.</string>
+</resources>

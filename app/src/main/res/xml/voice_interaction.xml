@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:recognitionService="io.github.panevx.csearchrevamped.assist.RecognitionStub"
+    android:sessionService="io.github.panevx.csearchrevamped.assist.AssistSessionService"
+    android:settingsActivity="io.github.panevx.csearchrevamped.MainActivity"
+    android:supportsAssist="true"
+    android:supportsLocalInteraction="false" />

@@ -1,0 +1,6 @@
+<resources>
+    <color name="brand">#6C4DF6</color>
+    <color name="brand_bg">#1B1530</color>
+    <color name="scrim">#66000000</color>
+    <color name="pill">#CC1E1E24</color>
+</resources>
