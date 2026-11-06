@@ -1,10 +1,12 @@
 package io.github.panevx.csearchrevamped
 
+import android.app.SearchManager
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
@@ -23,7 +25,11 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.isVisible
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -87,9 +93,12 @@ class OverlayActivity : AppCompatActivity() {
             hint.postDelayed(restoreHint, 1800)
         }
         Haptics.click(this)
+        setUpTextSelection()
 
         findViewById<View>(R.id.close).setOnClickListener { dismiss() }
-        onBackPressedDispatcher.addCallback(this) { dismiss() }
+        onBackPressedDispatcher.addCallback(this) {
+            if (selection.inTextMode) selection.endTextSelection() else dismiss()
+        }
         findViewById<View>(R.id.music).setOnClickListener {
             Haptics.tick(this)
             startActivity(Intent(this, MusicActivity::class.java))
@@ -121,6 +130,80 @@ class OverlayActivity : AppCompatActivity() {
                 else showText(text)
             }
         }
+    }
+
+    /**
+     * Tap-to-select text: OCR reads the frozen screenshot (the original page, never the
+     * translation overlay) as soon as the overlay opens, so tapping a word can select it.
+     */
+    private fun setUpTextSelection() {
+        val actions = findViewById<View>(R.id.actions)
+        val textActions = findViewById<View>(R.id.textActions)
+        val hint = findViewById<TextView>(R.id.hint)
+        lifecycleScope.launch {
+            val words = withContext(Dispatchers.Default) { runCatching { readWords(shot) }.getOrDefault(emptyList()) }
+            selection.words = words
+        }
+        selection.onTextSelection = { text, bounds ->
+            if (text == null || bounds == null) {
+                textActions.isVisible = false
+                actions.isVisible = true
+                hint.setText(R.string.hint_draw)
+            } else {
+                actions.isVisible = false
+                hint.setText(R.string.hint_text_selected)
+                textActions.isVisible = true
+                textActions.post { placeTextActions(textActions, bounds) }
+            }
+        }
+        findViewById<View>(R.id.textSearchGoogle).setOnClickListener {
+            Haptics.tick(this)
+            searchOnGoogle(selection.selectedText())
+        }
+        findViewById<View>(R.id.textCopy).setOnClickListener {
+            Haptics.tick(this)
+            getSystemService(ClipboardManager::class.java)
+                .setPrimaryClip(ClipData.newPlainText("text", selection.selectedText()))
+            Toast.makeText(this, R.string.copied, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Puts the toolbar just above the selection, or below it when there's no room. */
+    private fun placeTextActions(bar: View, bounds: android.graphics.RectF) {
+        val gap = 16 * resources.displayMetrics.density
+        val topLimit = findViewById<View>(R.id.topBar).bottom.toFloat()
+        val above = bounds.top - gap - bar.height
+        bar.y = if (above > topLimit) above else bounds.bottom + gap * 2.5f
+        bar.x = (bounds.centerX() - bar.width / 2f).coerceIn(gap, selection.width - bar.width - gap)
+    }
+
+    /** Words with their positions on the screenshot, in reading order. */
+    private suspend fun readWords(bitmap: Bitmap): List<SelectionView.Word> {
+        val client = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        try {
+            val text = client.process(InputImage.fromBitmap(bitmap, 0)).await()
+            val out = ArrayList<SelectionView.Word>()
+            var line = 0
+            for (block in text.textBlocks) for (l in block.lines) {
+                for (el in l.elements) el.boundingBox?.let { out.add(SelectionView.Word(el.text, it, line)) }
+                line++
+            }
+            return out
+        } finally {
+            client.close()
+        }
+    }
+
+    /** Opens Google Search with exactly this text: in the Google app if installed, otherwise the browser. */
+    private fun searchOnGoogle(text: String) {
+        if (text.isBlank()) return
+        val app = Intent(Intent.ACTION_WEB_SEARCH)
+            .setPackage("com.google.android.googlequicksearchbox")
+            .putExtra(SearchManager.QUERY, text)
+        val browser = Intent(Intent.ACTION_VIEW, Uri.parse(Links.search(text)))
+        val intent = if (app.resolveActivity(packageManager) != null) app else browser
+        runCatching { startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+            .onFailure { runCatching { startActivity(browser) } }
     }
 
     /** Fades the overlay out instead of cutting away. */

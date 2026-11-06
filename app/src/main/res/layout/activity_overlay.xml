@@ -102,6 +102,36 @@
             app:iconTint="@android:color/white" />
     </LinearLayout>
 
+    <!-- Floating toolbar for selected text, like Android's text selection menu -->
+    <LinearLayout
+        android:id="@+id/textActions"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:background="@drawable/bg_pill"
+        android:elevation="6dp"
+        android:orientation="horizontal"
+        android:padding="4dp"
+        android:visibility="gone">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/textSearchGoogle"
+            style="@style/Widget.Material3.Button.TextButton.Icon"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/search_google"
+            android:textColor="@android:color/white"
+            app:icon="@drawable/ic_search"
+            app:iconTint="@android:color/white" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/textCopy"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/copy"
+            android:textColor="@android:color/white" />
+    </LinearLayout>
+
     <com.google.android.material.progressindicator.CircularProgressIndicator
         android:id="@+id/progress"
         android:layout_width="wrap_content"

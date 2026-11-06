@@ -7,6 +7,8 @@
 
     <string name="hint_draw">Circle or tap anything to search</string>
     <string name="hint_selected">Search, translate or copy the selection</string>
+    <string name="hint_text_selected">Drag the handles to select more text</string>
+    <string name="search_google">Search on Google</string>
     <string name="hint_rejected">Circle a little bigger to search</string>
     <string name="live_translating">Translating to %1$s</string>
     <string name="live_downloading">Downloading %1$s → %2$s (one time)…</string>

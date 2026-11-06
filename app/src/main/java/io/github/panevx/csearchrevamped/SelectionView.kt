@@ -10,6 +10,7 @@ import android.graphics.LinearGradient
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.PointF
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
@@ -44,6 +45,26 @@ class SelectionView @JvmOverloads constructor(
 
     /** The gesture looked accidental and was ignored; the previous selection is kept. */
     var onRejected: (() -> Unit)? = null
+
+    // ---- Direct text selection (tap on text). Circles keep working exactly as before. ----
+
+    /** A word read by OCR from the screenshot, in reading order. [box] is in screenshot pixels. */
+    class Word(val text: String, val box: Rect, val line: Int)
+
+    /** Words on the screenshot (original, untranslated text); empty until OCR has finished. */
+    var words: List<Word> = emptyList()
+
+    /** Selected text and its bounds on screen, or null when text selection ends. */
+    var onTextSelection: ((text: String?, bounds: RectF?) -> Unit)? = null
+
+    val inTextMode: Boolean get() = selStart >= 0
+
+    private var selStart = -1
+    private var selEnd = -1
+    /** 0 = none, 1 = dragging the start handle, 2 = dragging the end handle. */
+    private var dragging = 0
+    private val highlightPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0x667C4DFF }
+    private val handlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF7C4DFF.toInt() }
 
     private val density = resources.displayMetrics.density
     private fun dp(v: Float) = v * density
@@ -125,8 +146,13 @@ class SelectionView @JvmOverloads constructor(
         shader?.setLocalMatrix(shaderMatrix)
 
         val radius = dp(20f)
-        val hasSelection = frameAlpha > 0f && !shown.isEmpty
-        dimPaint.alpha = ((if (hasSelection) 0x80 else 0x60) * min(1f, appear * 2f)).toInt()
+        val hasSelection = frameAlpha > 0f && !shown.isEmpty && !inTextMode
+        val dim = when {
+            inTextMode -> 0x30
+            hasSelection -> 0x80
+            else -> 0x60
+        }
+        dimPaint.alpha = (dim * min(1f, appear * 2f)).toInt()
         if (hasSelection) {
             canvas.save()
             hole.reset()
@@ -151,6 +177,7 @@ class SelectionView @JvmOverloads constructor(
             drawStroke(canvas, a) { p -> canvas.drawRoundRect(shown, radius, radius, p) }
         }
         if (pathAlpha > 0f) drawStroke(canvas, pathAlpha) { p -> canvas.drawPath(path, p) }
+        if (inTextMode) drawTextSelection(canvas)
 
         postInvalidateOnAnimation()
     }
@@ -163,6 +190,7 @@ class SelectionView @JvmOverloads constructor(
     }
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
+        if (handleTextTouch(e)) return true
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 animator?.cancel()
@@ -220,6 +248,18 @@ class SelectionView @JvmOverloads constructor(
             return
         }
 
+        if (tap) {
+            val word = wordAt(lastX, lastY)
+            if (word >= 0) {
+                // Tap on text: select the word instead of a screenshot region.
+                fadeOutPath()
+                startTextSelection(word)
+                return
+            }
+        }
+        // Any other gesture leaves text selection and works exactly as before.
+        if (inTextMode) endTextSelection()
+
         val target = RectF(minX, minY, maxX, maxY)
         val from = RectF(target)
         if (tap) {
@@ -268,6 +308,154 @@ class SelectionView @JvmOverloads constructor(
     }
 
     private fun lerp(a: Float, b: Float, t: Float) = a + (b - a) * t
+
+    // ---- Text selection helpers ----
+
+    private fun toView(r: Rect): RectF {
+        val b = bitmap ?: return RectF()
+        val sx = width / b.width.toFloat()
+        val sy = height / b.height.toFloat()
+        return RectF(r.left * sx, r.top * sy, r.right * sx, r.bottom * sy)
+    }
+
+    /** The word under (x, y) in view coordinates, with a little slack for fingers, or -1. */
+    private fun wordAt(x: Float, y: Float): Int {
+        val slack = dp(6f)
+        var best = -1
+        var bestDist = Float.MAX_VALUE
+        for ((i, w) in words.withIndex()) {
+            val r = toView(w.box).apply { inset(-slack, -slack) }
+            if (!r.contains(x, y)) continue
+            val d = hypot(r.centerX() - x, r.centerY() - y)
+            if (d < bestDist) { bestDist = d; best = i }
+        }
+        return best
+    }
+
+    /** The word nearest to (x, y): first the closest line, then the closest word on it. */
+    private fun nearestWord(x: Float, y: Float): Int {
+        if (words.isEmpty()) return -1
+        val lines = words.indices.groupBy { words[it].line }
+        val line = lines.values.minByOrNull { idx ->
+            val top = idx.minOf { toView(words[it].box).top }
+            val bottom = idx.maxOf { toView(words[it].box).bottom }
+            if (y in top..bottom) 0f else min(kotlin.math.abs(y - top), kotlin.math.abs(y - bottom))
+        } ?: return -1
+        return line.minByOrNull { i ->
+            val r = toView(words[i].box)
+            if (x in r.left..r.right) 0f else min(kotlin.math.abs(x - r.left), kotlin.math.abs(x - r.right))
+        } ?: -1
+    }
+
+    private fun startTextSelection(word: Int) {
+        // The region selection is replaced by the text selection.
+        selection = null
+        shown.setEmpty()
+        frameAlpha = 0f
+        selStart = word
+        selEnd = word
+        Haptics.click(context)
+        notifyTextSelection()
+    }
+
+    /** Leaves text selection (e.g. back button, or a new circle). */
+    fun endTextSelection() {
+        if (!inTextMode) return
+        selStart = -1
+        selEnd = -1
+        dragging = 0
+        onTextSelection?.invoke(null, null)
+        invalidate()
+    }
+
+    /** The exact selected text: words in reading order, separated by single spaces. */
+    fun selectedText(): String =
+        if (!inTextMode) "" else (selStart..selEnd).joinToString(" ") { words[it].text }
+
+    private fun selectionBounds(): RectF {
+        val r = RectF(toView(words[selStart].box))
+        for (i in selStart..selEnd) r.union(toView(words[i].box))
+        return r
+    }
+
+    private fun notifyTextSelection() {
+        onTextSelection?.invoke(selectedText(), selectionBounds())
+        invalidate()
+    }
+
+    /** Where a handle's teardrop sits: below the start of the first word / end of the last word. */
+    private fun handleCenter(start: Boolean): PointF {
+        val r = toView(words[if (start) selStart else selEnd].box)
+        val radius = dp(11f)
+        return if (start) PointF(r.left - radius, r.bottom + radius) else PointF(r.right + radius, r.bottom + radius)
+    }
+
+    /** Dragging the selection handles; returns true when the touch belongs to text selection. */
+    private fun handleTextTouch(e: MotionEvent): Boolean {
+        if (!inTextMode) return false
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                val grab = dp(28f)
+                val s = handleCenter(true)
+                val en = handleCenter(false)
+                val ds = hypot(e.x - s.x, e.y - s.y)
+                val de = hypot(e.x - en.x, e.y - en.y)
+                dragging = when {
+                    de <= grab && de <= ds -> 2
+                    ds <= grab -> 1
+                    else -> 0
+                }
+                if (dragging != 0) { Haptics.tick(context); return true }
+                return false
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (dragging == 0) return false
+                // Aim slightly above the finger, at the text line rather than the handle.
+                val target = nearestWord(e.x, e.y - dp(24f))
+                if (target < 0) return true
+                var start = selStart
+                var end = selEnd
+                if (dragging == 1) start = target else end = target
+                if (start > end) {
+                    val t = start; start = end; end = t
+                    dragging = if (dragging == 1) 2 else 1
+                }
+                if (start != selStart || end != selEnd) {
+                    selStart = start
+                    selEnd = end
+                    Haptics.tick(context)
+                    notifyTextSelection()
+                }
+                return true
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (dragging == 0) return false
+                dragging = 0
+                notifyTextSelection()
+                return true
+            }
+        }
+        return dragging != 0
+    }
+
+    private fun drawTextSelection(canvas: Canvas) {
+        // One highlight per line, from the first to the last selected word on it (like Android).
+        val pad = dp(2f)
+        (selStart..selEnd).groupBy { words[it].line }.values.forEach { idx ->
+            val r = RectF(toView(words[idx.first()].box))
+            idx.forEach { r.union(toView(words[it].box)) }
+            r.inset(-pad, -pad)
+            canvas.drawRoundRect(r, pad, pad, highlightPaint)
+        }
+        // Teardrop handles: a circle with one square corner pointing at the text.
+        val radius = dp(11f)
+        for (start in listOf(true, false)) {
+            val c = handleCenter(start)
+            canvas.drawCircle(c.x, c.y, radius, handlePaint)
+            val corner = if (start) RectF(c.x, c.y - radius, c.x + radius, c.y) else RectF(c.x - radius, c.y - radius, c.x, c.y)
+            canvas.drawRect(corner, handlePaint)
+        }
+    }
 
     /** Selection mapped into screenshot pixels, or null if nothing is selected. */
     fun selectionInBitmap(): Rect? {
