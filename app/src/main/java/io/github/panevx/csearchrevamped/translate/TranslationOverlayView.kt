@@ -55,7 +55,12 @@ class TranslationOverlayView(context: Context) : View(context) {
         /** The original background with the letters painted out, drawn at [patchRect] (screen coords). */
         val patch: Bitmap? = null,
         val patchRect: Rect? = null,
+        /** Identifies the block in the debug log ([TranslateTrace]); null when not logging. */
+        val traceKey: String? = null,
     )
+
+    /** Called with an item's [Item.traceKey] and a description of where it was drawn, once per placement. */
+    var onPlaced: ((String, String) -> Unit)? = null
 
     private class Placed(
         val rect: RectF,
@@ -97,13 +102,30 @@ class TranslationOverlayView(context: Context) : View(context) {
             val ink = item.ink
             val key = "${item.bounds.flattenToString()}|${item.text}|${item.background}|${item.foreground}|" +
                 "${item.maxRight}|${item.cut}|$typical|${ink?.textSize}|${ink?.area}|${ink?.bold}"
-            val p = cache[key] ?: place(item, typical)
+            val p = cache[key] ?: place(item, typical).also { placedNow ->
+                item.traceKey?.let { onPlaced?.invoke(it, describe(placedNow, item)) }
+            }
             used[key] = p
             Placed(p.rect, p.layout, p.textLeft, p.textTop, p.background, item.covers, item.patch, item.patchRect)
         }
         cache.clear()
         cache.putAll(used)
         invalidate()
+    }
+
+    private fun describe(p: Placed, item: Item): String {
+        val r = p.rect
+        val l = p.layout
+        val ellipsized = (0 until l.lineCount).any { l.getEllipsisCount(it) > 0 }
+        return "box [${r.left.toInt()},${r.top.toInt()}][${r.right.toInt()},${r.bottom.toInt()}] · " +
+            "text at (${p.textLeft.toInt()},${p.textTop.toInt()}) ${l.paint.textSize.toInt()}px, " +
+            "${l.lineCount} line(s) ${l.width}x${l.height}" +
+            (if (ellipsized) ", cut short with …" else "") +
+            (if (item.ink?.bold == true) ", bold" else "") +
+            (if (item.ink?.centered == true) ", centered" else "") +
+            (if (item.patch != null) ", background rebuilt" else ", flat background") +
+            (if (item.covers.isNotEmpty()) ", ${item.covers.size} thing(s) on top" else "") +
+            (if (item.cut != 0) ", partly off screen" else "")
     }
 
     private fun build(

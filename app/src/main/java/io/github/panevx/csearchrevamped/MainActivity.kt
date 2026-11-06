@@ -70,6 +70,11 @@ class MainActivity : AppCompatActivity() {
             isChecked = Prefs.autoSearch(this@MainActivity)
             setOnCheckedChangeListener { _, on -> Prefs.setAutoSearch(this@MainActivity, on) }
         }
+        findViewById<CompoundButton>(R.id.debugLog).apply {
+            isChecked = Prefs.debugLog(this@MainActivity)
+            setOnCheckedChangeListener { _, on -> Prefs.setDebugLog(this@MainActivity, on) }
+        }
+        findViewById<android.view.View>(R.id.btn_debug_share).setOnClickListener { shareDebugLog() }
         findViewById<EditText>(R.id.targetLang).apply {
             setOnClickListener {
                 Languages.pick(this@MainActivity, Prefs.targetLang(this@MainActivity)) { code ->
@@ -87,6 +92,26 @@ class MainActivity : AppCompatActivity() {
         setStatus(R.id.assistStatus, assistant)
         // The language can also be changed from the live translate bar.
         findViewById<EditText>(R.id.targetLang).setText(Languages.name(Prefs.targetLang(this)))
+    }
+
+    private fun shareDebugLog() {
+        val app = applicationContext
+        if (!io.github.panevx.csearchrevamped.translate.TranslateTrace.hasLog(app)) {
+            Toast.makeText(this, R.string.debug_empty, Toast.LENGTH_LONG).show()
+            return
+        }
+        Thread {
+            val zip = runCatching { io.github.panevx.csearchrevamped.translate.TranslateTrace.zip(app) }.getOrNull()
+            runOnUiThread {
+                if (zip == null || isFinishing) return@runOnUiThread
+                val uri = androidx.core.content.FileProvider.getUriForFile(this, "$packageName.files", zip)
+                val send = Intent(Intent.ACTION_SEND)
+                    .setType("application/zip")
+                    .putExtra(Intent.EXTRA_STREAM, uri)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                startActivity(Intent.createChooser(send, getString(R.string.debug_share)))
+            }
+        }.start()
     }
 
     private fun setStatus(id: Int, on: Boolean) {

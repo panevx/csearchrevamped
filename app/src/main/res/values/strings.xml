@@ -34,6 +34,10 @@
     <string name="offline_failed">Couldn\'t download %1$s.</string>
     <string name="offline_failed_wifi"> Connect to Wi-Fi or turn off "Download only on Wi-Fi".</string>
     <string name="auto_search">Search as soon as you circle</string>
+    <string name="debug_log">Translation debug log</string>
+    <string name="debug_log_help">Records, for each piece of text live translate handles, an image of it, what was read, the detected language, the translation and where it was drawn. Kept on your phone until you share it.</string>
+    <string name="debug_share">Share debug log</string>
+    <string name="debug_empty">No debug log yet: turn it on, then use live translate.</string>
     <string name="auto_search_help">Circles and scribbles search right away. A tap only highlights, and accidental flicks are ignored.</string>
     <string name="action_search">Search</string>
     <string name="action_translate">Translate</string>
