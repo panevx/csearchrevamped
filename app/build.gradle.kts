@@ -38,6 +38,10 @@ android {
         }
     }
 
+    androidResources {
+        noCompress += "traineddata"
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -56,6 +60,9 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // Offline OCR for scripts ML Kit can't read (Bulgarian/Cyrillic); models in assets/tessdata
+    implementation("cz.adaptech.tesseract4android:tesseract4android:4.9.0")
 
     // On-device live translation
     implementation("com.google.mlkit:translate:17.0.3")

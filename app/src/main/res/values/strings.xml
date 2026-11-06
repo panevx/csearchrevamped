@@ -11,6 +11,7 @@
     <string name="search_google">Search on Google</string>
     <string name="hint_rejected">Circle a little bigger to search</string>
     <string name="live_translating">Translating to %1$s</string>
+    <string name="live_offline_missing">%1$s isn\'t downloaded: connect once to get it</string>
     <string name="live_downloading">Downloading %1$s → %2$s (one time)…</string>
     <string name="live_stop">Stop translating</string>
     <string name="live_collapse">Hide to the side</string>

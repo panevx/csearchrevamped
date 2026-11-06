@@ -164,6 +164,8 @@ class TranslationOverlayView(context: Context) : View(context) {
         var size = when {
             // Cut-off text can't be checked against its box, so don't trust a measurement far from the page's usual size.
             measured != null && item.cut != 0 -> min(measured, typical * 1.4f)
+            // Far bigger than what the reported text would fit: the page shows only part of it ("…").
+            measured != null && fit < measured * 0.8f -> measured
             measured != null -> min(measured, fit)
             item.cut != 0 -> typical
             else -> fit
@@ -196,9 +198,12 @@ class TranslationOverlayView(context: Context) : View(context) {
             layout = build(item.text, size, w, color, spacing, centered, bold = bold)
             rect.right = max(rect.right, b.left + inset + w + pad * 2)
         }
-        // Then shrink until it fits the original's height.
-        while (layout.height > h && size > minSize) {
-            size = max(minSize, size * 0.93f)
+        // Then shrink until it fits the original's height, but not far below the original's size:
+        // pages often cut long text short with "…" while reporting all of it, so beyond that the
+        // translation is cut short the same way.
+        val floor = max(minSize, size * 0.7f)
+        while (layout.height > h && size > floor) {
+            size = max(floor, size * 0.93f)
             layout = build(item.text, size, w, color, 1f, centered, bold = bold)
         }
         if (layout.height > h) {

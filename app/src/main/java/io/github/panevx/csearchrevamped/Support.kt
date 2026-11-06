@@ -6,7 +6,6 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.provider.Settings
 import java.net.URLEncoder
-import java.util.Locale
 
 /** Hands bitmaps between the capture source and the activities in the same process. */
 object ScreenshotHolder {
@@ -17,8 +16,9 @@ object ScreenshotHolder {
 object Prefs {
     private fun prefs(c: Context) = c.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
+    /** The language to translate into: English unless the user picked another. */
     fun targetLang(c: Context): String =
-        prefs(c).getString("target_lang", null)?.takeIf { it.isNotBlank() } ?: Locale.getDefault().language
+        prefs(c).getString("target_lang", null)?.takeIf { it.isNotBlank() } ?: "en"
     fun setTargetLang(c: Context, v: String) = prefs(c).edit().putString("target_lang", v.trim()).apply()
 
     fun wifiOnly(c: Context): Boolean = prefs(c).getBoolean("wifi_only", true)

@@ -15,6 +15,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.LruCache
 import android.view.ContextThemeWrapper
+import android.view.Display
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
@@ -23,6 +24,10 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.TextView
 import androidx.core.view.isVisible
+import com.google.mlkit.common.model.RemoteModelManager
+import com.google.mlkit.nl.translate.TranslateRemoteModel
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import com.google.mlkit.nl.languageid.LanguageIdentification
 import com.google.mlkit.nl.languageid.LanguageIdentificationOptions
 import com.google.mlkit.nl.languageid.LanguageIdentifier
@@ -44,7 +49,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
@@ -72,6 +79,8 @@ class LiveTranslator(
         val parent: Int = 0,
         val grandparent: Int = 0,
         var covers: List<Rect> = emptyList(),
+        /** A separate tap target (icon, button, tab): never joined with neighbours. */
+        val clickable: Boolean = false,
     )
 
     /** Something drawn on screen, in drawing order: used to keep translations from painting over it. */
@@ -84,8 +93,16 @@ class LiveTranslator(
         const val SCREENSHOT_INTERVAL_MS = 1050L
         /** Share of a line's area covered by ink above which text counts as bold. */
         const val BOLD_FILL = 0.355f
+        const val BOLD_FILL_CYRILLIC = 0.3f
+        /** Stroke thickness relative to the line height above which text is bold. */
+        const val BOLD_STROKE = 0.165f
         /** OCR lines below this confidence (noise in photos, logos) are left alone. */
         const val OCR_CONFIDENCE = 0.6f
+        /** Tesseract paragraph confidence (0-100) below which a reading isn't trusted. */
+        const val TESSERACT_CONFIDENCE = 70f
+        /** How often to check again for a language that can't be downloaded while offline. */
+        const val OFFLINE_RETRY_MS = 3000L
+        val CYRILLIC_LANGUAGES = setOf("bg", "ru", "uk", "mk", "sr", "be")
         /** How long scrolling must have stopped before translating the new position. */
         const val SCROLL_SETTLE_MS = 220L
     }
@@ -136,8 +153,15 @@ class LiveTranslator(
      */
     private val ocr by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
     private var ocrBlocks: List<TextBlock> = emptyList()
-    /** Web pages and images on screen: the only places OCR results are used (never app controls). */
-    private val readableAreas = ArrayList<Rect>()
+    /**
+     * Where OCR saw text on screen (any confidence), or null before it has looked. Text that apps
+     * report but don't draw (e.g. hidden labels under home-screen icons) has none and is skipped.
+     */
+    private var ocrEvidence: List<Rect>? = null
+    /** Reported texts present when OCR last looked: new ones trigger another look. */
+    private var checkedTexts: Set<String> = emptySet()
+    /** Text fields (typing, address bars): OCR results there are never used. */
+    private val editableAreas = ArrayList<Rect>()
     /** Images and their descriptions: OCR text matching the description is a logo, kept as it is. */
     private val imageLabels = ArrayList<Pair<Rect, String>>()
     private var ocrDone = false
@@ -149,6 +173,7 @@ class LiveTranslator(
         pendingSince = 0L
         // What was read from the screen belongs to the old scroll position.
         ocrBlocks = emptyList()
+        ocrEvidence = null
         ocrDone = false
         refresh()
         overlay?.animate()?.alpha(1f)?.setDuration(140)?.start()
@@ -196,6 +221,7 @@ class LiveTranslator(
         translators.values.forEach { it.close() }
         langId.close()
         runCatching { ocr.close() }
+        closeCyrillicOcr()
         onClosed()
     }
 
@@ -254,14 +280,16 @@ class LiveTranslator(
         val obstacles = ArrayList<Rect>()
         val shapes = ArrayList<Shape>()
         order = 0
-        readableAreas.clear()
+        editableAreas.clear()
         imageLabels.clear()
         collect(root, screen, screen, screen, found, obstacles, shapes, 0, 0, 0)
-        val fromTree = mergeFragments(found)
+        val fromTree = fitToLetters(mergeFragments(found))
         limitGrowth(fromTree, obstacles, screen)
         findCovers(fromTree, shapes)
         // Add what OCR read on screen that the app didn't report (or that's inside images).
-        val merged = fromTree + ocrBlocks.filter { o -> fromTree.none { overlapsMostly(it.bounds, o.bounds) } }
+        // OCR only fills in where the app reports no text: what the app reports is exact.
+        val merged = fromTree + ocrBlocks.filter { o -> fromTree.none { Rect.intersects(it.bounds, o.bounds) } }
+        if (ocrDone && fromTree.any { it.text !in checkedTexts }) ocrDone = false
         blocks = merged
         render()
         sampleColors(root, merged)
@@ -272,6 +300,47 @@ class LiveTranslator(
                 translateAll(missing)
                 if (blocks.any { cache.get(it.text) == null }) scheduleRefresh()
             }
+        }
+    }
+
+    /**
+     * Whether OCR text at [e] shows [b] itself, not something drawn over it (a dialog's own text
+     * over the page behind it).
+     */
+    private fun seenOutsideCovers(e: Rect, b: TextBlock): Boolean {
+        val part = Rect(e)
+        if (!part.intersect(b.bounds)) return false
+        val area = part.width().toLong() * part.height()
+        return b.covers.none { c ->
+            val hidden = Rect(part)
+            hidden.intersect(c) && hidden.width().toLong() * hidden.height() >= area * 7 / 10
+        }
+    }
+
+    /**
+     * Some apps report a label with the bounds of the whole control (a home-screen icon and its
+     * name): once OCR has seen where the letters are, such text is shrunk to them, so the
+     * translation keeps the label's size and place and doesn't cover the icon.
+     */
+    private fun fitToLetters(found: List<TextBlock>): List<TextBlock> {
+        val evidence = ocrEvidence ?: return found
+        return found.map { b ->
+            val letters = Rect()
+            for (e in evidence) {
+                val part = Rect(e)
+                if (part.intersect(b.bounds)) letters.union(part)
+            }
+            if (letters.isEmpty) return@map b
+            val tall = letters.height() < b.bounds.height() * 0.6f
+            // A short label in a wide control (a button): its letters, not the whole button, so the
+            // button's shape stays as it is around the translation.
+            val wide = letters.width() < b.bounds.width() * 0.7f && letters.height() < b.bounds.height() * 0.8f
+            if (!tall && !wide) return@map b
+            val pad = maxOf(3, letters.height() / 6)
+            letters.inset(-pad * 2, -pad)
+            if (!letters.intersect(b.bounds)) return@map b
+            val fitted = if (wide) letters else Rect(b.bounds.left, letters.top, b.bounds.right, letters.bottom)
+            b.copy(bounds = fitted, maxRight = maxOf(fitted.right, minOf(b.maxRight, b.bounds.right)))
         }
     }
 
@@ -303,8 +372,8 @@ class LiveTranslator(
         val text = node.text?.toString()?.trim()
         // An image's text is its description (alt text), not something drawn on screen.
         val isImage = node.className?.contains("Image") == true
-        if ((isImage || node.className?.contains("WebView") == true) && !r.isEmpty) readableAreas.add(Rect(r))
         if (isImage && !text.isNullOrBlank() && !r.isEmpty) imageLabels.add(Rect(r) to text.toString())
+        if (node.isEditable && !r.isEmpty) editableAreas.add(Rect(r))
         val hasText = !isImage && !text.isNullOrEmpty() && text.any { it.isLetter() }
 
         // Edges of scrolling lists, where text gets cut off while scrolling. Short scrolling strips
@@ -347,7 +416,12 @@ class LiveTranslator(
                 else -> 0
             }
             if (!container && shown && visible.width() > 8 && visible.height() > 8) {
-                out.add(TextBlock(text!!, visible, cut = cut, order = myOrder, parent = parentKey, grandparent = grandparentKey))
+                out.add(
+                    TextBlock(
+                        text!!, visible, cut = cut, order = myOrder, parent = parentKey,
+                        grandparent = grandparentKey, clickable = node.isClickable,
+                    )
+                )
                 shapes.add(Shape(myOrder, visible))
             }
             return true
@@ -359,7 +433,11 @@ class LiveTranslator(
         // Leaves, tappable things and anything smaller than a page (cards, banners, pop-ups,
         // toolbars) are solid on screen. Page-sized layout containers are usually transparent.
         val pageSized = r.width().toLong() * r.height() > screen.width().toLong() * screen.height() * 2 / 5
-        if ((node.childCount == 0 || node.isClickable || !pageSized) && !r.isEmpty) shapes.add(Shape(myOrder, r))
+        // Page-sized ones count when they hold content and can be tapped (a consent dialog) or are a
+        // picture; a bare page-sized element is an invisible helper (the home screen lays one over
+        // all its icons).
+        val solid = !pageSized || node.isClickable && node.childCount > 0 || node.childCount == 0 && isImage
+        if (solid && !r.isEmpty) shapes.add(Shape(myOrder, r))
         return hasText
     }
 
@@ -375,12 +453,16 @@ class LiveTranslator(
             // Pieces of one paragraph share a parent, or a link inside it sits one level deeper.
             val related = last != null && (last.parent == b.parent || last.parent == b.grandparent ||
                 last.grandparent == b.parent || last.grandparent == b.grandparent)
-            if (last != null && (related && overlapsMostly(last.bounds, b.bounds) || continuesLine(last.bounds, b.bounds))) {
+            val separateTargets = last != null && last.clickable && b.clickable
+            if (last != null && !separateTargets &&
+                (related && overlapsMostly(last.bounds, b.bounds) || continuesLine(last.bounds, b.bounds))
+            ) {
                 val joiner = if (last.text.last().isWhitespace() || b.text.first().let { !it.isLetterOrDigit() }) "" else " "
                 out[out.size - 1] = TextBlock(
                     last.text + joiner + b.text, Rect(last.bounds).apply { union(b.bounds) },
                     cut = if (last.cut != 0) last.cut else b.cut,
                     order = last.order, lastOrder = b.lastOrder, parent = last.parent, grandparent = last.grandparent,
+                    clickable = last.clickable,
                 )
             } else {
                 out.add(b)
@@ -452,6 +534,11 @@ class LiveTranslator(
             val m = colors.get(measureKey(b))
             // Briefly hold back until the real colors are known so boxes don't flash white.
             if (m == null && waitForColors) return@mapNotNull null
+            if (b.parent != -1 && waitForColors) {
+                // Reported text is only drawn where OCR actually saw text on screen.
+                val evidence = ocrEvidence ?: return@mapNotNull null
+                if (evidence.none { seenOutsideCovers(it, b) }) return@mapNotNull null
+            }
             val v = m?.v
             // Rows hidden behind a pinned header or footer are left alone.
             var bounds = b.bounds
@@ -483,62 +570,111 @@ class LiveTranslator(
     /** Reads the text on the screenshot and adds the blocks the tree didn't have; measures them too. */
     private fun readScreen(bmp: Bitmap, px: IntArray, windowOrigin: Rect) {
         scope.launch {
-            val result = runCatching {
-                // Starts ML Kit native code: not at the same time as a translator (see nativeInit).
-                nativeInit.withLock { ocr.process(InputImage.fromBitmap(bmp, 0)).await() }
-            }.getOrNull()
-            bmp.recycle()
-            if (result == null || stopped || scrolling) return@launch
             val screen = wm.currentWindowMetrics.bounds
-            val out = ArrayList<TextBlock>()
-            val allLineHeights = result.textBlocks.flatMap { it.lines }.mapNotNull { it.boundingBox?.height() }.sorted()
-            val usual = if (allLineHeights.isEmpty()) 0 else allLineHeights[allLineHeights.size / 2]
-            for (tb in result.textBlocks) {
-                val lines = tb.lines.filter { it.confidence >= OCR_CONFIDENCE && it.text.count { c -> c.isLetter() } >= 2 }
-                if (lines.isEmpty()) continue
-                val box = Rect()
-                lines.forEach { l -> l.boundingBox?.let { box.union(it) } }
-                if (box.isEmpty || box.height() < 10) continue
-                // OCR boxes hug the letters; give them a little room so the background can be sampled.
-                val lineHeight = box.height() / lines.size
-                box.inset(-maxOf(3, lineHeight / 5), -maxOf(3, lineHeight / 6))
-                box.offset(windowOrigin.left, windowOrigin.top)
-                box.intersect(screen)
-                val cut = when {
-                    box.top <= screen.top + 2 -> -1
-                    box.bottom >= screen.bottom - 2 -> 1
-                    else -> 0
-                }
-                val text = lines.joinToString(" ") { it.text }
-                // Only text inside a web page or an image: never the app's own buttons or address bar.
-                val inside = readableAreas.any { area ->
-                    val i = Rect()
-                    i.setIntersect(area, box) && i.width().toLong() * i.height() >= box.width().toLong() * box.height() * 8 / 10
-                }
-                if (!inside) continue
-                // A logo: the image's description is the same words (e.g. "Sammy Fans").
-                val letters = text.filter { it.isLetterOrDigit() }.lowercase()
-                val logo = imageLabels.any { (area, label) ->
-                    val l = label.filter { it.isLetterOrDigit() }.lowercase()
-                    Rect.intersects(area, box) && letters.length >= 2 && (l.contains(letters) || letters.contains(l))
-                }
-                // Logos and brand marks: a short phrase in capitals, much bigger than the page's text.
-                val words = text.split(' ').filter { it.isNotBlank() }
-                val caps = text.filter { it.isLetter() }
-                val bigCaps = words.size <= 3 && caps.isNotEmpty() && caps.all { it.isUpperCase() } && lineHeight > usual * 1.6f
-                if (logo || bigCaps) continue
-                out.add(TextBlock(text, box, maxRight = box.right, cut = cut, order = Int.MAX_VALUE - 1, parent = -1))
-            }
-            ocrBlocks = out
             val w = bmp.width
             val h = bmp.height
-            for (b in out) {
-                if (colors.get(measureKey(b)) != null) continue
-                val r = Rect(b.bounds).apply { offset(-windowOrigin.left, -windowOrigin.top) }
-                sample(px, w, h, r, b.text, b.cut != 0)?.let { colors.put(measureKey(b), it) }
+            try {
+                // 1. ML Kit: fast and accurate for Latin script.
+                val result = runCatching {
+                    // Starts ML Kit native code: not at the same time as a translator (see nativeInit).
+                    nativeInit.withLock { ocr.process(InputImage.fromBitmap(bmp, 0)).await() }
+                }.getOrNull()
+                if (stopped || scrolling) return@launch
+                val found = ArrayList<OcrText>()
+                var unsure = 0
+                result?.textBlocks?.forEach { tb ->
+                    unsure += tb.lines.count { it.confidence < OCR_CONFIDENCE }
+                    val lines = tb.lines.filter { it.confidence >= OCR_CONFIDENCE && it.text.count { c -> c.isLetter() } >= 2 }
+                    if (lines.isEmpty()) return@forEach
+                    val box = Rect()
+                    lines.forEach { l -> l.boundingBox?.let { box.union(it) } }
+                    if (!box.isEmpty) found.add(OcrText(lines.joinToString(" ") { it.text }, box, lines.size))
+                }
+                ocrEvidence = result?.textBlocks.orEmpty().flatMap { it.lines }.mapNotNull { l ->
+                    l.boundingBox?.let { Rect(it).apply { offset(windowOrigin.left, windowOrigin.top) } }
+                }
+                // 2. Tesseract for Cyrillic (Bulgarian), which ML Kit can't read: when the screen shows
+                // Cyrillic text, or ML Kit met text it couldn't read confidently. ML Kit reads Cyrillic
+                // as Latin gibberish ("Mpeka"), so then its results wait for Tesseract's.
+                val cyrillicOnScreen = blocks.any { CyrillicOcr.hasCyrillic(it.text) }
+                if (!cyrillicOnScreen && unsure < 2) {
+                    publishOcr(found, px, w, h, windowOrigin, screen)
+                    return@launch
+                }
+                val paragraphs = tessLock.withLock {
+                    withContext(Dispatchers.Default) { runCatching { cyrillicOcr.read(bmp) }.getOrDefault(emptyList()) }
+                }
+                if (stopped || scrolling) return@launch
+                val trusted = paragraphs
+                    .filter { it.confidence >= TESSERACT_CONFIDENCE && CyrillicOcr.hasCyrillic(it.text) && it.box.height() >= 10 }
+                // Only real Cyrillic readings count as evidence: Tesseract also "reads" icons as junk.
+                ocrEvidence = ocrEvidence.orEmpty() + trusted.map { Rect(it.box).apply { offset(windowOrigin.left, windowOrigin.top) } }
+                val cyrillic = trusted
+                    .map { p -> OcrText(p.text, p.box, maxOf(1, (p.box.height() / 40f).toInt())) }
+                    // Where ML Kit read real Latin text (a web address, an English name), Tesseract's
+                    // Cyrillic is a misreading.
+                    .filter { c -> found.none { f -> Rect.intersects(f.box, c.box) && CyrillicOcr.clearlyLatin(f.text) } }
+                // Cyrillic read by ML Kit comes out as Latin gibberish: Tesseract's reading replaces it.
+                val merged = found.filter { f -> cyrillic.none { Rect.intersects(it.box, f.box) } } + cyrillic
+                publishOcr(merged, px, w, h, windowOrigin, screen)
+            } finally {
+                bmp.recycle()
+                if (stopped) closeCyrillicOcr()
             }
-            scheduleRefresh()
         }
+    }
+
+    /** Text found by OCR, in screenshot pixels. */
+    private class OcrText(val text: String, val box: Rect, val lines: Int)
+
+    /** Turns OCR results into blocks (skipping text fields and logos), measures them and redraws. */
+    private fun publishOcr(found: List<OcrText>, px: IntArray, w: Int, h: Int, windowOrigin: Rect, screen: Rect) {
+        val lineHeights = found.map { it.box.height() / it.lines }.sorted()
+        val usual = if (lineHeights.isEmpty()) 0 else lineHeights[lineHeights.size / 2]
+        val out = ArrayList<TextBlock>()
+        for (f in found) {
+            val box = Rect(f.box)
+            if (box.height() < 10) continue
+            // OCR boxes hug the letters; give them a little room so the background can be sampled.
+            val lineHeight = box.height() / f.lines
+            box.inset(-maxOf(3, lineHeight / 5), -maxOf(3, lineHeight / 6))
+            box.offset(windowOrigin.left, windowOrigin.top)
+            if (!box.intersect(screen)) continue
+            val text = f.text
+            // Never text the user is typing or an address bar.
+            if (editableAreas.any { Rect.intersects(it, box) }) continue
+            // A logo: the image's description is the same words (e.g. "Sammy Fans").
+            val letters = text.filter { it.isLetterOrDigit() }.lowercase()
+            val logo = imageLabels.any { (area, label) ->
+                val l = label.filter { it.isLetterOrDigit() }.lowercase()
+                Rect.intersects(area, box) && letters.length >= 2 && (l.contains(letters) || letters.contains(l))
+            }
+            // Logos and brand marks: a short phrase in capitals, much bigger than the page's text.
+            val words = text.split(' ').filter { it.isNotBlank() }
+            val caps = text.filter { it.isLetter() }
+            val bigCaps = words.size <= 3 && caps.isNotEmpty() && caps.all { it.isUpperCase() } && lineHeight > usual * 1.6f
+            if (logo || bigCaps) continue
+            val cut = when {
+                box.top <= screen.top + 2 -> -1
+                box.bottom >= screen.bottom - 2 -> 1
+                else -> 0
+            }
+            out.add(TextBlock(text, box, maxRight = box.right, cut = cut, order = Int.MAX_VALUE - 1, parent = -1))
+        }
+        ocrBlocks = out
+        for (b in out) {
+            if (colors.get(measureKey(b)) != null) continue
+            val r = Rect(b.bounds).apply { offset(-windowOrigin.left, -windowOrigin.top) }
+            sample(px, w, h, r, b.text, b.cut != 0)?.let { colors.put(measureKey(b), it) }
+        }
+        scheduleRefresh()
+    }
+
+    private val cyrillicOcr by lazy { CyrillicOcr(service) }
+    private val tessLock = Mutex()
+
+    private fun closeCyrillicOcr() {
+        if (!tessLock.isLocked) runCatching { cyrillicOcr.close() }
     }
 
     /** Text partly off screen looks different from the same text fully in view, so measure each separately. */
@@ -564,50 +700,94 @@ class LiveTranslator(
         }
         shotPending = true
         lastShotAt = now
-        val windowOrigin = Rect().also { root.getBoundsInScreen(it) }
-        service.takeScreenshotOfWindow(
-            root.windowId, service.mainExecutor,
-            object : AccessibilityService.TakeScreenshotCallback {
-                override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
-                    shotPending = false
-                    val buffer = result.hardwareBuffer
-                    val hw = Bitmap.wrapHardwareBuffer(buffer, result.colorSpace)
-                    val bmp = hw?.copy(Bitmap.Config.ARGB_8888, false)
-                    hw?.recycle()
-                    buffer.close()
-                    if (bmp == null || stopped) return
-                    val w = bmp.width
-                    val h = bmp.height
-                    val px = IntArray(w * h)
-                    bmp.getPixels(px, 0, w, 0, 0, w, h)
-                    if (!ocrDone) {
-                        ocrDone = true
-                        readScreen(bmp, px, windowOrigin)
-                    } else {
-                        bmp.recycle()
-                    }
-                    for (b in missing) {
-                        val r = Rect(b.bounds).apply { offset(-windowOrigin.left, -windowOrigin.top) }
-                        val covers = b.covers.map { Rect(it).apply { offset(-windowOrigin.left, -windowOrigin.top) } }
-                        val growTo = b.maxRight - windowOrigin.left
-                        sample(px, w, h, r, b.text, b.cut != 0, covers, growTo)?.let { colors.put(measureKey(b), it) }
-                    }
-                    shotFailures = 0
-                    render()
-                }
+        val pkg = root.packageName?.toString()
+        val callback = object : AccessibilityService.TakeScreenshotCallback {
+            // Window screenshots are relative to the window; display screenshots to the screen.
+            val usedDisplay = pkg in displayShotApps
+            val windowOrigin = if (usedDisplay) Rect() else Rect().also { root.getBoundsInScreen(it) }
 
-                override fun onFailure(errorCode: Int) {
-                    shotPending = false
-                    if (errorCode == AccessibilityService.ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT) {
-                        // Just too soon after the previous one: try again shortly.
-                        handler.postDelayed({ if (!stopped && !scrolling) scheduleRefresh() }, SCREENSHOT_INTERVAL_MS)
-                    } else {
-                        shotFailures++
-                    }
-                    render()
+            override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
+                shotPending = false
+                if (usedDisplay) showOverlay(true)
+                val buffer = result.hardwareBuffer
+                val hw = Bitmap.wrapHardwareBuffer(buffer, result.colorSpace)
+                val bmp = hw?.copy(Bitmap.Config.ARGB_8888, false)
+                hw?.recycle()
+                buffer.close()
+                if (bmp == null || stopped) return
+                val w = bmp.width
+                val h = bmp.height
+                val px = IntArray(w * h)
+                bmp.getPixels(px, 0, w, 0, 0, w, h)
+                if (!usedDisplay && pkg != null && mostlyTransparent(px)) {
+                    // A see-through window (e.g. the home screen over its wallpaper): its own pixels
+                    // don't show what's on screen, so this app gets full-display screenshots instead.
+                    bmp.recycle()
+                    displayShotApps.add(pkg)
+                    lastShotAt = 0L
+                    handler.postDelayed({ if (!stopped && !scrolling) scheduleRefresh() }, SCREENSHOT_INTERVAL_MS)
+                    return
                 }
-            },
-        )
+                if (!ocrDone) {
+                    ocrDone = true
+                    checkedTexts = blocks.filter { it.parent != -1 }.map { it.text }.toSet()
+                    readScreen(bmp, px, windowOrigin)
+                } else {
+                    bmp.recycle()
+                }
+                for (b in missing) {
+                    val r = Rect(b.bounds).apply { offset(-windowOrigin.left, -windowOrigin.top) }
+                    val covers = b.covers.map { Rect(it).apply { offset(-windowOrigin.left, -windowOrigin.top) } }
+                    val growTo = b.maxRight - windowOrigin.left
+                    sample(px, w, h, r, b.text, b.cut != 0, covers, growTo)?.let { colors.put(measureKey(b), it) }
+                }
+                shotFailures = 0
+                render()
+            }
+
+            override fun onFailure(errorCode: Int) {
+                shotPending = false
+                if (usedDisplay) showOverlay(true)
+                if (errorCode == AccessibilityService.ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT) {
+                    // Just too soon after the previous one: try again shortly.
+                    handler.postDelayed({ if (!stopped && !scrolling) scheduleRefresh() }, SCREENSHOT_INTERVAL_MS)
+                } else {
+                    shotFailures++
+                }
+                render()
+            }
+        }
+        if (callback.usedDisplay) {
+            // The display screenshot would include our own translations and bar: hide them for it.
+            showOverlay(false)
+            handler.postDelayed({
+                service.takeScreenshot(Display.DEFAULT_DISPLAY, service.mainExecutor, callback)
+            }, 48)
+        } else {
+            service.takeScreenshotOfWindow(root.windowId, service.mainExecutor, callback)
+        }
+    }
+
+    /** Apps whose windows are see-through (home screens): screenshots of the whole display are used. */
+    private val displayShotApps = HashSet<String>()
+
+    private fun mostlyTransparent(px: IntArray): Boolean {
+        var clear = 0
+        var total = 0
+        var i = 0
+        while (i < px.size) {
+            if (Color.alpha(px[i]) < 128) clear++
+            total++
+            i += 997
+        }
+        return clear > total / 5
+    }
+
+    private fun showOverlay(visible: Boolean) {
+        val a = if (visible) 1f else 0f
+        overlay?.animate()?.cancel()
+        if (!scrolling) overlay?.alpha = a
+        bar?.alpha = a
     }
 
     /**
@@ -615,6 +795,41 @@ class LiveTranslator(
      * [background, text color, font size px, lines, ink left, ink top, ink right, ink bottom
      * (relative to the bounds), centered, line pitch px, bounds width, bounds height].
      */
+    /**
+     * Typical thickness of the letters' strokes, relative to the line height: the median length of
+     * runs of ink across the middle rows of each line. Unlike the amount of ink, it doesn't depend
+     * on the alphabet, so it tells bold from regular for any script.
+     */
+    private fun strokeWidth(px: IntArray, w: Int, r: Rect, bands: List<IntArray>, bg: Int, covers: List<Rect>): Float {
+        val runs = ArrayList<Int>()
+        var heights = 0f
+        for (band in bands) {
+            val bh = band[1] - band[0]
+            if (bh < 6) continue
+            heights += bh
+            // The middle of a line crosses the vertical strokes of nearly every letter.
+            for (row in (band[0] + bh * 2 / 5)..(band[0] + bh * 3 / 5)) {
+                val y = r.top + row
+                var run = 0
+                for (x in r.left until r.right) {
+                    val c = px[y * w + x]
+                    val ink = abs(Color.red(c) - Color.red(bg)) + abs(Color.green(c) - Color.green(bg)) +
+                        abs(Color.blue(c) - Color.blue(bg)) > 200 && covers.none { it.contains(x, y) }
+                    if (ink) {
+                        run++
+                    } else if (run > 0) {
+                        runs.add(run); run = 0
+                    }
+                }
+                if (run > 0) runs.add(run)
+            }
+        }
+        if (runs.size < 4 || heights == 0f) return 0f
+        runs.sort()
+        val usable = bands.count { it[1] - it[0] >= 6 }
+        return runs[runs.size / 2] / (heights / usable)
+    }
+
     private fun sample(
         px: IntArray,
         w: Int,
@@ -752,7 +967,14 @@ class LiveTranslator(
         if (bands.isNotEmpty() && inkRight > inkLeft) {
             val inked = rowCount.sum().toFloat()
             val lineArea = bands.sumOf { it[1] - it[0] } * (inkRight - inkLeft + 1) / 2f
-            if (lineArea > 0 && inked / lineArea > BOLD_FILL) bold = 1
+            val fill = if (lineArea > 0) inked / lineArea else 0f
+            bold = if (CyrillicOcr.hasCyrillic(text)) {
+                // Cyrillic fills its lines more than Latin (few ascenders), so the amount of ink alone
+                // misleads: the strokes must also be thick.
+                if (fill > BOLD_FILL_CYRILLIC && strokeWidth(px, w, r, bands, bg, covers) > BOLD_STROKE) 1 else 0
+            } else {
+                if (fill > BOLD_FILL) 1 else 0
+            }
         }
 
         // Rows hidden behind something pinned on top (a sticky header or footer bar) show that
@@ -898,6 +1120,15 @@ class LiveTranslator(
             if (at100 <= 0f) return (lineHeight / 0.95f).toInt()
             inkWidth * 100f / at100
         } else {
+            measurePaint.textSize = lo
+            val atSmallest = StaticLayout.Builder.obtain(text, 0, text.length, measurePaint, maxOf(1, inkWidth))
+                .setIncludePad(false).build().lineCount
+            if (atSmallest > lines) {
+                // Doesn't fit even at the smallest plausible size: the page shows only part of the
+                // text ("…"), so only the height of its lines tells the size. Cyrillic lines are
+                // shorter (few tall letters) than Latin ones.
+                return (lineHeight / if (CyrillicOcr.hasCyrillic(text)) 0.75f else 0.95f).toInt()
+            }
             var a = lo
             var b = hi
             repeat(8) {
@@ -916,14 +1147,19 @@ class LiveTranslator(
 
     private suspend fun translateAll(texts: List<String>) {
         // The first language check also starts ML Kit's native code: do it alone (see nativeInit).
-        val pageLang = nativeInit.withLock { identify(texts.joinToString("\n").take(2000)) }
+        val pageSample = texts.joinToString("\n").take(2000)
+        val pageLang = nativeInit.withLock { preferBulgarian(pageSample, identify(pageSample), "") }
         // A few at a time, top of the screen first; each one appears as soon as it's ready.
         for (chunk in texts.chunked(6)) {
             chunk.map { text ->
                 scope.async {
                     translate(text, pageLang)?.let { tr ->
                         // A translation with no letters (e.g. an icon read as a letter) isn't trusted.
-                        val it = if (text.any { c -> c.isLetter() } && tr.none { c -> c.isLetter() }) "" else tr
+                        // Nor is one that only spells the original in Latin letters ("Пт" -> "PT").
+                        val noLetters = text.any { c -> c.isLetter() } && tr.none { c -> c.isLetter() }
+                        // And one that changes nothing (names, addresses) is left as the original.
+                        val unchanged = tr.filter { c -> c.isLetterOrDigit() }.equals(text.filter { c -> c.isLetterOrDigit() }, ignoreCase = true)
+                        val it = if (noLetters || unchanged || CyrillicOcr.sameWord(text, tr)) "" else tr
                         cache.put(text, it)
                         renderSoon()
                     }
@@ -933,16 +1169,37 @@ class LiveTranslator(
         showTranslatingStatus()
     }
 
+    /**
+     * Short Bulgarian text is often taken for Russian or Macedonian (they share the alphabet and
+     * many words). For Cyrillic text, Bulgarian wins when it's one of the likely languages or the
+     * page is Bulgarian; Cyrillic that can't be identified at all is treated as the page's language,
+     * or Bulgarian.
+     */
+    private suspend fun preferBulgarian(text: String, lang: String, pageLang: String): String {
+        if (!CyrillicOcr.hasCyrillic(text, 1)) return lang
+        if (lang == TranslateLanguage.BULGARIAN) return lang
+        if (lang == LanguageIdentifier.UNDETERMINED_LANGUAGE_TAG) {
+            return if (pageLang in CYRILLIC_LANGUAGES) pageLang else TranslateLanguage.BULGARIAN
+        }
+        if (lang !in CYRILLIC_LANGUAGES) return lang
+        if (pageLang == TranslateLanguage.BULGARIAN) return TranslateLanguage.BULGARIAN
+        val candidates = runCatching { langId.identifyPossibleLanguages(text).await() }.getOrDefault(emptyList())
+        return if (candidates.any { it.languageTag == TranslateLanguage.BULGARIAN && it.confidence >= 0.05f }) {
+            TranslateLanguage.BULGARIAN
+        } else {
+            lang
+        }
+    }
+
     private suspend fun identify(text: String): String =
         runCatching { langId.identifyLanguage(text).await() }.getOrDefault(LanguageIdentifier.UNDETERMINED_LANGUAGE_TAG)
 
     /** Returns the translation, "" to leave the text alone, or null on a temporary failure. */
     private suspend fun translate(text: String, pageLang: String): String? {
-        var lang = identify(text)
+        var lang = preferBulgarian(text, identify(text), pageLang)
         if (lang == LanguageIdentifier.UNDETERMINED_LANGUAGE_TAG) lang = pageLang
         val source = TranslateLanguage.fromLanguageTag(lang) ?: return ""
         if (source == target) return ""
-
         val translator = translators.getOrPut(source) {
             Translation.getClient(
                 TranslatorOptions.Builder().setSourceLanguage(source).setTargetLanguage(target).build()
@@ -950,9 +1207,24 @@ class LiveTranslator(
         }
         val ready = models.getOrPut(source) {
             scope.async {
-                setStatus(
-                    service.getString(R.string.live_downloading, Languages.name(source), Languages.name(target))
-                )
+                val have = runCatching {
+                    RemoteModelManager.getInstance().getDownloadedModels(TranslateRemoteModel::class.java).await()
+                        .map { it.language }
+                }.getOrDefault(emptyList())
+                val missing = listOf(source, target).filter { it !in have }
+                if (missing.isNotEmpty()) {
+                    if (!online()) {
+                        // Offline and never downloaded: say so instead of waiting for a download.
+                        setStatus(
+                            service.getString(R.string.live_offline_missing, missing.joinToString { Languages.name(it) })
+                        )
+                        delay(OFFLINE_RETRY_MS)
+                        return@async false
+                    }
+                    setStatus(
+                        service.getString(R.string.live_downloading, Languages.name(source), Languages.name(target))
+                    )
+                }
                 // ML Kit's native code must not be started from two threads at once (it aborts the
                 // app), so each translator is set up and warmed up one at a time.
                 nativeInit.withLock {
@@ -963,12 +1235,18 @@ class LiveTranslator(
                 }
             }
         }
-        if (!ready.await()) {
+        val ok = ready.await()
+        if (!ok) {
             models.remove(source)
             return null
         }
         return runCatching { translator.translate(text).await() }
             .getOrNull()
+    }
+
+    private fun online(): Boolean {
+        val cm = service.getSystemService(ConnectivityManager::class.java) ?: return false
+        return cm.getNetworkCapabilities(cm.activeNetwork)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
     }
 
     private fun showTranslatingStatus() = setStatus(service.getString(R.string.live_translating, Languages.name(target)))

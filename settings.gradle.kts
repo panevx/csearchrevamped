@@ -10,6 +10,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // Tesseract4Android (offline OCR that reads Cyrillic)
+        maven { url = uri("https://jitpack.io") }
     }
 }
 rootProject.name = "csearchrevamped"
